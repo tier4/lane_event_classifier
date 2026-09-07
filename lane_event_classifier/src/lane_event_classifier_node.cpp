@@ -56,14 +56,15 @@ LaneEventClassifierNode::LaneEventClassifierNode(const rclcpp::NodeOptions & nod
 
 void LaneEventClassifierNode::build_classifiers()
 {
-  lane_following_checker_ = LaneFollowingChecker();
+  lane_following_checker_ = LaneFollowingChecker(params_.lane_following);
 
   // Classifiers are constructed here (no plugin/pluginlib): the node owns a vector of concrete
-  // LaneEventClassifierBase implementations and iterates it in on_trajectory(). Each classifier's
-  // real logic and its enable/config parameters are added in its own follow-up PR; today they are
-  // no-op stubs so the loading and aggregation path is exercised end-to-end.
+  // LaneEventClassifierBase implementations and iterates it in on_trajectory(). Each classifier
+  // derives its own per-cycle geometry from the shared LaneTracker's generic queries. The
+  // intentional-crossing classifier is still a no-op stub until its own follow-up PR.
   classifiers_.clear();
-  classifiers_.emplace_back(std::make_unique<LaneChangeClassifier>(true));
+  classifiers_.emplace_back(std::make_unique<LaneChangeClassifier>(
+    params_.lane_change.enable_classifier, params_.lane_change, lane_tracker_));
   classifiers_.emplace_back(std::make_unique<IntentionalCrossingClassifier>(true));
 }
 
@@ -210,8 +211,11 @@ void LaneEventClassifierNode::on_trajectory(
   lane_tracker_.update(input_);
   const double lane_tracker_time_ms = stop_watch.toc("lane_tracker");
 
+  const auto & ego_position = input_.odometry_ptr->pose.pose.position;
   stop_watch.tic("lane_following");
-  const auto lane_following_result = lane_following_checker_.evaluate();
+  const auto lane_following_result = lane_following_checker_.evaluate(
+    lane_tracker_.lanelet_map_ptr(), lane_tracker_.routing_graph_ptr(),
+    lane_tracker_.reference_lane().reference_lane_id, {ego_position.x, ego_position.y});
   const double lane_following_time_ms = stop_watch.toc("lane_following");
 
   uint8_t current_state_val = DrivingState::LANE_FOLLOWING;
@@ -247,6 +251,19 @@ void LaneEventClassifierNode::on_trajectory(
 
   out.driving_state.state = current_state_val;
   pub_driving_factor_->publish(out);
+
+  // Freeze the reference lane while an event is active, and release it once the event ends. A
+  // maneuver ends in a lane that is not a forward successor of the reference (e.g. a lane change
+  // into a parallel lane), and the tracker only re-anchors into a forward successor; without
+  // releasing, the reference would stay pinned to the origin lane forever and the classifier would
+  // re-detect the same crossing every cycle. Releasing re-anchors the tracker to the lane the ego
+  // settled into. Holding also activates the far-departure reset in check_tracking_state (a manual
+  // takeover that drives away from the held lane), which is gated on the reference lane being held.
+  if (is_any_event_active && !lane_tracker_.is_reference_lane_held()) {
+    lane_tracker_.hold_reference_lane();
+  } else if (!is_any_event_active && lane_tracker_.is_reference_lane_held()) {
+    lane_tracker_.release_reference_lane();
+  }
 
   const double total_time_ms = stop_watch.toc();
 

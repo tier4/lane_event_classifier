@@ -1,6 +1,6 @@
 # lane_event_classifier
 
-Classifies lane events — lane change, intentional lane crossing — for event logging.
+Classifies lane events, lane change, intentional lane crossing, for event logging.
 
 ---
 
@@ -19,26 +19,32 @@ and for how long.
 
 ---
 
+## Key words
+
+These terms are shared across the classifiers. Each classifier's own doc links here on first use and
+defines only the terms specific to it.
+
+| Term            | Meaning                                                                                                                                                                                      |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reference lane  | The lane the tracker is holding for the ego this cycle. Locked while an event runs, released and re-anchored to the ego's current lane when the event ends.                                  |
+| Route primitive | A preferred lane of the current route, one of the planned-path lanes the ego drives on a best-effort basis. So "is this lane a route primitive?" asks whether the lane is part of that path. |
+
+---
+
 ## Inputs and output
 
 **Trigger.** The node runs once per planned trajectory message. `/planning/trajectory` is the clock.
 
 ### Subscriptions
 
-| Topic                      | Type                   | Role                                                                                                           |
-| -------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `/planning/trajectory`     | `Trajectory`           | Per-cycle trigger; also the predictive signal for lane change.                                                 |
-| `/map/vector_map`          | `LaneletMapBin`        | The lanelet map (latched, taken once).                                                                         |
-| _(polled)_ odometry        | `Odometry`             | Ego pose; its stamp drives all timers (determinism).                                                           |
-| _(polled)_ route           | `LaneletRoute`         | The mission and its preferred primitives.                                                                      |
-| _(polled)_ objects         | `PredictedObjects`     | Perceived objects (used by crossing logic).                                                                    |
-| _(polled)_ turn indicators | `TurnIndicatorsReport` | Optional hint for the lane-change confidence booster. Never a precondition — if missing, the cycle still runs. |
-
-!!! note
-
-    A **route primitive** is the sequence of lanes, the planned path, that the ego will try to drive
-    on with best effort. So "is this lane a route primitive?" asks whether the lane is part of that
-    path.
+| Topic                      | Type                   | Role                                                                                                          |
+| -------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `/planning/trajectory`     | `Trajectory`           | Per-cycle trigger; also the predictive signal for lane change.                                                |
+| `/map/vector_map`          | `LaneletMapBin`        | The lanelet map (latched, taken once).                                                                        |
+| _(polled)_ odometry        | `Odometry`             | Ego pose; its stamp drives all timers (determinism).                                                          |
+| _(polled)_ route           | `LaneletRoute`         | The mission and its preferred primitives.                                                                     |
+| _(polled)_ objects         | `PredictedObjects`     | Perceived objects (used by crossing logic).                                                                   |
+| _(polled)_ turn indicators | `TurnIndicatorsReport` | Optional hint for the lane-change confidence booster. Never a precondition, if missing, the cycle still runs. |
 
 ### Publication
 
@@ -65,7 +71,8 @@ and for how long.
 > still inside the lane it is supposed to be following?_ Its result is
 > the **default label**: when no classifier claims an event, the check passing gives `LANE_FOLLOWING`,
 > and the check failing (the ego left its lane, unexplained) gives `UNKNOWN`. It runs alongside the
-> classifiers, not before them — they run every cycle regardless.
+> classifiers, not before them, they run every cycle regardless. Full rule chain:
+> [`docs/lane_following.md`](docs/lane_following.md).
 
 ```mermaid
 ---
@@ -125,14 +132,14 @@ cycle. Adding a classifier is: implement the interface, then register it in `bui
 
 ## What's implemented now
 
-| Piece                              | Status                                                           |
-| ---------------------------------- | ---------------------------------------------------------------- |
-| Node I/O (subscriptions/publisher) | ✅ implemented                                                   |
-| Classifier loading + aggregation   | ✅ implemented                                                   |
-| `LaneFollowingChecker`             | 🚧 stub — always reports following                               |
-| `LaneChangeClassifier`             | 🚧 stub — reports no event                                       |
-| `IntentionalCrossingClassifier`    | 🚧 stub — reports no event                                       |
-| `LaneTracker` (map/reference lane) | ✅ implemented — owns the map, routing graph, and reference lane |
+| Piece                              | Status                                                                 |
+| ---------------------------------- | ---------------------------------------------------------------------- |
+| Node I/O (subscriptions/publisher) | ✅ implemented                                                         |
+| Classifier loading + aggregation   | ✅ implemented                                                         |
+| `LaneFollowingChecker`             | ✅ implemented, see [`docs/lane_following.md`](docs/lane_following.md) |
+| `LaneChangeClassifier`             | ✅ implemented, see [docs/lane_change.md](docs/lane_change.md)         |
+| `IntentionalCrossingClassifier`    | 🚧 stub, reports no event                                              |
+| `LaneTracker` (map/reference lane) | ✅ implemented, owns the map, routing graph, and reference lane        |
 
 ---
 
@@ -146,14 +153,10 @@ Defaults: [`param/lane_event_classifier.param.yaml`](param/lane_event_classifier
 | `reposition_jump_margin_m`        | Localization-noise margin added to the speed-explained step (`speed · dt`); a per-cycle ego step beyond that is treated as a reposition jump and resets the tracking state. |
 | `lane_departure_reset_distance_m` | While the reference lane is held, distance from the ego to that lane above which the tracking state is reset (countermeasure for a manual takeover).                        |
 
-Each classifier gains its own enable flag and parameters when its logic lands.
+Lane-following check parameters (`lane_following.*`) are documented in [`docs/lane_following.md`](docs/lane_following.md#parameters).
+
+Lane-change classifier parameters (`lane_change.*`) are documented in [`docs/lane_change.md`](docs/lane_change.md#parameters).
+
+The intentional-crossing classifier gains its own enable flag and parameters when its logic lands.
 
 ---
-
-## Design notes
-
-- **Determinism.** All timers use the message timestamp (`odometry.header.stamp`), never wall-clock
-  time. Replaying the same rosbag gives the same output.
-- **The lane-following check and the classifiers are independent.** The check is a stateless "am I in
-  my lane?" test; the classifiers are stateful event recognisers. The node combines them; neither
-  drives the other.
