@@ -23,38 +23,34 @@
 
 #include <lanelet2_core/primitives/Lanelet.h>
 
+#include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace lane_event_classifier
 {
 
-/**
- * @brief The perceived-object half of the lane-crossing policy layer.
- *
- * A lane crossing is only meaningful when the ego has an obstacle to pass, so this class turns the
- * tracker's forward lane sequence and the per-cycle perceived objects into the candidate objects
- * the trajectory must go around: those touching the reference straight sequence ahead of the ego
- * within the window. It is a plain value type holding the object window and is injected into the
- * classifier (dependency injection), kept separate from the boundary geometry so each has a single
- * responsibility. The geometry layer decides whether the trajectory brackets one of these
- * candidates (out before it, back after it). See docs/lane_crossing.md, "Onset".
- */
+/** @brief The perceived-object half of the lane-crossing policy layer. */
 class LaneCrossingObjects
 {
 public:
-  explicit LaneCrossingObjects(double object_longitudinal_window_m);
+  /**
+   * @param object_longitudinal_window_m Ahead-of-ego arc window for a candidate object.
+   * @param object_lateral_buffer_m Lateral slack outside the lane-sequence polygons.
+   * @param ignored_object_labels Classification names that never qualify (e.g. "UNKNOWN").
+   */
+  LaneCrossingObjects(
+    double object_longitudinal_window_m, double object_lateral_buffer_m,
+    const std::vector<std::string> & ignored_object_labels);
 
   /** @brief The candidate objects for one cycle (returned by value; no out-params). */
   struct Result
   {
-    // Map-frame poses of objects touching the reference straight sequence ahead of the ego within
-    // the window - the candidates the trajectory must bracket to onset. An object need not be
-    // static: a moving object the ego follows straight produces no departure, so it cannot onset a
-    // crossing on its own; the bracket geometry, not a speed threshold, does the discrimination.
+    // Map-frame poses of objects ahead on the sequence that the trajectory must bracket to onset.
     std::vector<geometry_msgs::msg::Pose> candidate_object_poses;
     // Human-readable breakdown of the candidate-object scan for this cycle (debug logging only).
-    std::string diagnostic;
+    std::string debug_diagnostic;
   };
 
   /** @brief Observes the candidate objects the ego might cross to avoid this cycle. */
@@ -63,19 +59,17 @@ public:
 private:
   using PredictedObject = autoware_perception_msgs::msg::PredictedObject;
 
-  /** @brief Per-cycle tally of how the perceived objects sit relative to the forward lane sequence,
-   * kept so the diagnostic can explain the candidate decision. */
+  /** @brief Per-cycle tally of how the perceived objects sit relative to the lane sequence. */
   struct LaneSequenceScan
   {
     std::vector<geometry_msgs::msg::Pose>
-      candidate_object_poses;           // touch sequence, ahead in window
-    int lane_sequence_object_count{0};  // touch the lane sequence at all (any position)
-    double nearest_ahead_m{-1.0};       // arc distance to the nearest object ahead (-1 when none)
-    double nearest_ahead_speed_mps{0.0};
+      candidate_object_poses;                 // touch sequence, ahead in window
+    int debug_lane_sequence_object_count{0};  // touch the lane sequence at all (any position)
+    double debug_nearest_ahead_m{-1.0};  // arc distance to the nearest object ahead (-1 when none)
+    double debug_nearest_ahead_speed_mps{0.0};
   };
 
-  /** @brief Scans every object against the forward lane sequence and collects the candidate poses
-   * plus the nearest-ahead diagnostic (returned by value). */
+  /** @brief Scans every object against the lane sequence and collects the candidate poses. */
   [[nodiscard]] LaneSequenceScan scan_lane_sequence_objects(
     const lanelet::ConstLanelets & lane_sequence, const std::vector<PredictedObject> & objects,
     double ego_arc_length_m) const;
@@ -83,7 +77,9 @@ private:
   /** @brief True when the object lies ahead of the ego within the longitudinal window. */
   [[nodiscard]] bool object_is_ahead_within_window(double arc_distance_ahead_m) const;
 
-  double object_longitudinal_window_m_;  // ahead-of-ego arc window for a candidate object
+  double object_longitudinal_window_m_;         // ahead-of-ego arc window for a candidate object
+  double object_lateral_buffer_m_;              // lateral slack outside the lane-sequence polygons
+  std::unordered_set<uint8_t> ignored_labels_;  // classifications that never qualify
 };
 
 }  // namespace lane_event_classifier

@@ -18,6 +18,9 @@
 #include <autoware/vehicle_info_utils/vehicle_info_utils.hpp>
 #include <autoware_utils/ros/polling_subscriber.hpp>
 #include <lane_event_classifier/debug.hpp>
+#include <lane_event_classifier/detail/debounced_signal.hpp>
+#include <lane_event_classifier/detail/geometry_utils.hpp>
+#include <lane_event_classifier/detail/lane_event_context.hpp>
 #include <lane_event_classifier/detail/lane_tracker.hpp>
 #include <lane_event_classifier/lane_change/classifier.hpp>
 #include <lane_event_classifier/lane_crossing/classifier.hpp>
@@ -58,20 +61,10 @@ private:
     const autoware_planning_msgs::msg::Trajectory::ConstSharedPtr & trajectory_msg);
   void build_classifiers();
 
-  /**
-   * @brief Returns true when the tracking state can no longer be trusted and must be reset.
-   *
-   * Triggers on a reposition jump (localization discontinuity), or the ego straying far from a
-   * held reference lane (e.g. a manual takeover that drives away from the route). Advances the
-   * ego-pose bookkeeping each cycle and records the cause in tracking_reset_reason_ for
-   * reset_tracking_state() to log.
-   */
+  /** @brief Returns true when the tracking state can no longer be trusted and must be reset. */
   tl::expected<void, std::string> check_tracking_state();
 
-  /**
-   * @brief Resets the tracking state: restarts the classifiers from LANE_FOLLOWING and releases the
-   * reference-lane hold so it re-anchors, logging the cause recorded by check_tracking_state().
-   */
+  /** @brief Resets the tracking state: restarts the classifiers and releases the lane hold. */
   void reset_tracking_state(const std::string & tracking_reset_reason);
 
   // Publishers
@@ -106,8 +99,10 @@ private:
   LaneEventInput input_;
   LaneTracker lane_tracker_;
 
-  // Lane-following check — evaluated here (outside any classifier) and reported alongside the
-  // state.
+  // Reference-lane geometry derived once per cycle and shared by every consumer.
+  LaneEventContext context_;
+
+  // Lane-following check — evaluated outside any classifier and reported with the state.
   LaneFollowingChecker lane_following_checker_;
 
   autoware::vehicle_info_utils::VehicleInfo vehicle_info_;
@@ -118,10 +113,11 @@ private:
   // Classifiers — instantiated in build_classifiers()
   std::vector<std::unique_ptr<LaneEventClassifierBase>> classifiers_;
 
-  // Previous ego pose and its stamp — a step between cycles that exceeds the motion the reported
-  // speed can explain (speed * dt) is treated as a reposition jump and resets the tracking state.
-  std::optional<lanelet::BasicPoint2d> previous_ego_position_;
-  std::optional<rclcpp::Time> previous_ego_stamp_;
+  // Previous ego motion — a step larger than those speeds explain is a reposition jump.
+  std::optional<EgoMotionSample> previous_ego_motion_;
+
+  // Debounces a stuck unheld reference lane before the node resets the tracking state.
+  DebouncedSignal<bool> stuck_reanchor_signal_;
 };
 
 }  // namespace lane_event_classifier

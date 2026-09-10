@@ -15,6 +15,7 @@
 #ifndef LANE_EVENT_CLASSIFIER__LANE_CHANGE__GEOMETRY_HPP_
 #define LANE_EVENT_CLASSIFIER__LANE_CHANGE__GEOMETRY_HPP_
 
+#include <lane_event_classifier/detail/lane_event_context.hpp>
 #include <lane_event_classifier/detail/lane_tracker.hpp>
 #include <lane_event_classifier/types.hpp>
 
@@ -37,8 +38,7 @@ struct LaneChangeCrossing
 /** @brief Per-cycle lane-change geometry the classifier reasons over. */
 struct LaneChangeObservation
 {
-  // A valid onset crossing (heads to a route primitive, exemptions passed); nullopt otherwise.
-  // Predictive — populated even while the footprint is still inside the reference lane.
+  // Onset: a predictive crossing toward a route primitive, exemptions passed; else nullopt.
   std::optional<LaneChangeCrossing> crossing;
   // Abort observation: the trajectory heads back into the reference lane (no forward crossing).
   bool trajectory_returns_to_reference{false};
@@ -50,13 +50,7 @@ struct LaneChangeObservation
   std::optional<lanelet::Id> settle_lane_id;
 };
 
-/**
- * @brief Computes the per-cycle lane-change observation from a LaneTracker's generic queries.
- *
- * This is the lane-change policy layer (onset, exemptions, abort, and settle): the tracker stays a
- * map/geometry library and knows nothing about lane changes; this class interprets its queries. See
- * docs/lane_change.md.
- */
+/** @brief Computes the per-cycle lane-change observation from a LaneTracker's queries. */
 class LaneChangeGeometry
 {
 public:
@@ -64,13 +58,14 @@ public:
 
   /** @brief Builds the observation for this cycle from the tracker's (already refreshed) state. */
   [[nodiscard]] LaneChangeObservation observe(
-    const LaneTracker & tracker, const LaneEventInput & input) const;
+    const LaneTracker & tracker, const LaneEventInput & input,
+    const LaneEventContext & context) const;
 
 private:
   /** @brief The valid lane-change crossing of the trajectory over the reference boundary, if any.
    * @param trajectory_points Forward trajectory samples (computed once per cycle by observe). */
   [[nodiscard]] std::optional<LaneChangeCrossing> compute_crossing(
-    const LaneTracker & tracker, const LaneEventInput & input,
+    const LaneTracker & tracker, const LaneEventInput & input, const LaneEventContext & context,
     const std::vector<lanelet::BasicPoint2d> & trajectory_points) const;
 
   /** @brief True when the trajectory heads back into the reference lane (abort observation).

@@ -15,23 +15,17 @@
 #ifndef LANE_EVENT_CLASSIFIER__LANE_EVENT_CLASSIFIER_BASE_HPP_
 #define LANE_EVENT_CLASSIFIER__LANE_EVENT_CLASSIFIER_BASE_HPP_
 
+#include <lane_event_classifier/detail/lane_event_context.hpp>
 #include <lane_event_classifier/types.hpp>
 
-#include <visualization_msgs/msg/marker_array.hpp>
-
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace lane_event_classifier
 {
 
-class LaneTracker;
-
-/** @brief Interface for lane-event classifiers.
- *
- * Each classifier holds the (generic) LaneTracker it depends on and derives its own per-cycle
- * geometry from the tracker's queries, so no shared per-cycle context is passed here.
- */
+/** @brief Interface for lane-event classifiers. */
 class LaneEventClassifierBase
 {
 public:
@@ -40,11 +34,18 @@ public:
   /**
    * @brief Updates the classifier with the latest cycle's input.
    * @param input Per-cycle subscribed inputs and footprint.
+   * @param context Reference-lane geometry derived once for this cycle.
    */
-  virtual void update(const LaneEventInput & input) = 0;
+  virtual void update(const LaneEventInput & input, const LaneEventContext & context) = 0;
 
-  /** @brief Returns the current DrivingState of this classifier. */
-  [[nodiscard]] virtual uint8_t get_state() const = 0;
+  /**
+   * @brief Returns this classifier's DrivingState, or nullopt when it claims no event.
+   *
+   * Reporting a state also freezes the tracker's reference lane: the node holds it while any
+   * classifier reports and releases it when none does. Every classifier therefore observes a
+   * reference lane that any other classifier's event can pin.
+   */
+  [[nodiscard]] virtual std::optional<uint8_t> get_state() const = 0;
 
   /** @brief Returns whether this classifier is enabled. */
   [[nodiscard]] virtual bool is_enabled() const = 0;
@@ -54,12 +55,6 @@ public:
 
   /** @brief One-line reason for the most recent state transition (debug/logging only). */
   [[nodiscard]] virtual std::string debug_reason() const { return {}; }
-
-  /** @brief Appends this classifier's debug markers to the given array. */
-  virtual void fill_debug_markers(
-    const LaneEventInput &, const LaneTracker &, visualization_msgs::msg::MarkerArray &) const
-  {
-  }
 };
 
 }  // namespace lane_event_classifier

@@ -15,6 +15,8 @@
 #ifndef LANE_EVENT_CLASSIFIER__LANE_CROSSING__GEOMETRY_HPP_
 #define LANE_EVENT_CLASSIFIER__LANE_CROSSING__GEOMETRY_HPP_
 
+#include <autoware_utils_geometry/boost_geometry.hpp>
+#include <lane_event_classifier/detail/lane_event_context.hpp>
 #include <lane_event_classifier/detail/lane_tracker.hpp>
 #include <lane_event_classifier/types.hpp>
 
@@ -30,6 +32,42 @@
 namespace lane_event_classifier
 {
 
+/** @brief Lateral boundaries of the forward lane sequence. */
+struct LaneSequenceBounds
+{
+  autoware_utils_geometry::LineString2d left;
+  autoware_utils_geometry::LineString2d right;
+};
+
+/** @brief Where a detection source says the ego leaves the lane sequence. */
+struct CrossingCandidate
+{
+  bool is_to_left{false};
+  lanelet::BasicPoint2d point{0.0, 0.0};
+};
+
+/** @brief The forward lane sequence with its bounds and the ego clearance to each side. */
+struct LaneSequenceGeometry
+{
+  lanelet::ConstLanelets lane_sequence;
+  LaneSequenceBounds bounds;
+  double distance_to_left_boundary_m{0.0};
+  double distance_to_right_boundary_m{0.0};
+};
+
+/** @brief The thresholds the lane-crossing geometry measures against. */
+struct CrossingThresholds
+{
+  // Fore/aft reach for the route-sequence membership set, and the boundary-length fallback.
+  double crossing_look_ahead_m{0.0};
+  // Min body overshoot past the boundary for the physical (footprint) crossing source.
+  double footprint_boundary_overshoot_m{0.0};
+  // Max ego-footprint distance to the crossed-side boundary for the predictive source to onset.
+  double predictive_lateral_trigger_distance_m{0.0};
+  // Max distance from the poking footprint corner to the candidate object it dodges.
+  double footprint_crossing_object_proximity_m{0.0};
+};
+
 /** @brief Where the planned trajectory crosses the reference lane's lateral boundary. */
 struct LaneCrossingCrossing
 {
@@ -38,46 +76,35 @@ struct LaneCrossingCrossing
   lanelet::BasicPoint2d crossing_point{
     0.0, 0.0};             // where the trajectory first crosses the reference boundary
   bool is_to_left{false};  // crossing is toward the reference lane's left side
+  bool is_from_trajectory_source{false};  // predictive source (a), not the footprint source (b)
 };
 
 /** @brief The boundary / footprint half of the per-cycle lane-crossing observation. */
 struct LaneCrossingObservation
 {
-  // A valid onset crossing (on-route-straight scope gate + exemptions passed); nullopt otherwise.
-  // Predictive — populated from the trajectory, even while the footprint is still inside the lane.
+  // Onset: a predictive crossing that passed the scope gate and the exemptions; else nullopt.
   std::optional<LaneCrossingCrossing> crossing;
   // Return / completion: the footprint is fully inside a lane of the reference straight sequence.
   bool is_footprint_inside_reference_sequence{false};
-  // Full-entry escape: a non-sequence lane the footprint is fully inside — the move is a lane
-  // change.
+  // Full-entry escape: a non-sequence lane the footprint is fully inside, so it is a lane change.
   std::optional<lanelet::Id> full_entry_lane_id;
   // Scope gate: the reference lane is on-route and going straight keeps the ego on-route.
   bool is_on_route_straight{false};
   // Human-readable breakdown of the crossing-detection check for this cycle (debug logging only).
-  std::string crossing_diagnostic;
+  std::string debug_crossing_diagnostic;
 };
 
-/**
- * @brief The boundary / footprint half of the lane-crossing policy layer.
- *
- * Scope gate, onset crossing, return, and full-entry escape over a LaneTracker's generic queries:
- * the tracker stays a map/geometry library and knows nothing about crossings; this class interprets
- * its queries. The perceived-object half lives in LaneCrossingObjects. It is a plain value type
- * holding the boundary thresholds and is injected into the classifier (dependency injection). Onset
- * is predictive, mirroring LaneChangeGeometry.
- */
+/** @brief The boundary / footprint half of the lane-crossing policy layer. */
 class LaneCrossingGeometry
 {
 public:
-  LaneCrossingGeometry(
-    double crossing_look_ahead_m, double footprint_boundary_overshoot_m,
-    double predictive_lateral_trigger_distance_m);
+  explicit LaneCrossingGeometry(CrossingThresholds thresholds);
 
   /** @brief Builds the observation for this cycle from the tracker's (already refreshed) state.
    * @param candidate_object_poses Objects the ego might cross to avoid (from LaneCrossingObjects):
    * onset fires only when the trajectory brackets one of them. */
   [[nodiscard]] LaneCrossingObservation observe(
-    const LaneTracker & tracker, const LaneEventInput & input,
+    const LaneTracker & tracker, const LaneEventInput & input, const LaneEventContext & context,
     const std::vector<geometry_msgs::msg::Pose> & candidate_object_poses) const;
 
 private:
@@ -85,13 +112,22 @@ private:
   struct CrossingResult
   {
     std::optional<LaneCrossingCrossing> crossing;
-    std::string diagnostic;
+    std::string debug_diagnostic;
   };
 
-  /** @brief True when the reference lane is a route primitive whose straight successor is also a
-   * route primitive, so going straight stays on-route (the scope gate). */
-  [[nodiscard]] static bool driving_straight_stays_on_route(
-    const LaneTracker & tracker, lanelet::Id reference_lane_id);
+  /** @brief One cycle's crossing-detection inputs, gathered once by observe(). */
+  struct CrossingRequest
+  {
+    const lanelet::ConstLanelet & reference_lane;
+    // Forward trajectory samples over the planned arc length.
+    const std::vector<lanelet::BasicPoint2d> & trajectory_points;
+    // Ego footprint corners in the map frame (the physical body this cycle).
+    const std::vector<lanelet::BasicPoint2d> & footprint;
+    // Objects the ego might cross to avoid; onset requires at least one.
+    const std::vector<geometry_msgs::msg::Pose> & candidate_object_poses;
+    // Forward length the lane-sequence boundary is built to.
+    double boundary_look_ahead_m{0.0};
+  };
 
   /** @brief The valid lane-crossing crossing over the reference boundary (with its diagnostic).
    * Two sources, both gated on a candidate object to go around: (a) predictive - the planned
@@ -99,23 +135,31 @@ private:
    * in after it), detected while the ego body is still inside the lane; (b) physical - the current
    * ego footprint (the real body, so a yawed corner poking over the line counts) crosses the
    * boundary into a lane outside the sequence. A path that stays in the neighbour (never returns)
-   * is left to the lane-change classifier.
-   * @param reference_lane The tracker's current reference lanelet.
-   * @param sequence_ids The reference lane's straight sequence (fore/aft) within the look-ahead.
-   * @param trajectory_points Forward trajectory samples (computed once per cycle by observe).
-   * @param footprint The ego footprint corners in the map frame (the physical body this cycle).
-   * @param footprint_ids Lanes the footprint touches (computed once per cycle by observe).
-   * @param candidate_object_poses Objects the ego might cross to avoid; onset requires one.
-   * @param boundary_look_ahead_m Forward length the lane-sequence boundary is built to (the planned
-   * trajectory's own arc length when available; a fallback otherwise). */
+   * is left to the lane-change classifier. See docs/lane_crossing.md.
+   * @param tracker Generic lane queries.
+   * @param context Reference-lane geometry derived once for this cycle.
+   * @param request This cycle's crossing-detection inputs. */
   [[nodiscard]] CrossingResult compute_crossing(
-    const LaneTracker & tracker, const lanelet::ConstLanelet & reference_lane,
-    const std::unordered_set<lanelet::Id> & sequence_ids,
-    const std::vector<lanelet::BasicPoint2d> & trajectory_points,
-    const std::vector<lanelet::BasicPoint2d> & footprint,
-    const std::vector<lanelet::Id> & footprint_ids,
-    const std::vector<geometry_msgs::msg::Pose> & candidate_object_poses,
-    double boundary_look_ahead_m) const;
+    const LaneTracker & tracker, const LaneEventContext & context,
+    const CrossingRequest & request) const;
+
+  /** @brief The candidate chosen from the two sources, with the source label and diagnostic. */
+  struct SourceScan
+  {
+    std::optional<CrossingCandidate> candidate;
+    bool is_from_trajectory_source{false};
+    std::string source;
+    std::string debug_detail;
+  };
+
+  /** @brief Runs both detection sources and prefers the predictive one.
+   * @param tracker Generic lane queries.
+   * @param context Reference-lane geometry derived once for this cycle.
+   * @param request This cycle's crossing-detection inputs.
+   * @param sequence The forward lane sequence with its bounds and the ego clearance. */
+  [[nodiscard]] SourceScan scan_sources(
+    const LaneTracker & tracker, const LaneEventContext & context, const CrossingRequest & request,
+    const LaneSequenceGeometry & sequence) const;
 
   /** @brief True when the footprint is fully inside a lane of the reference straight sequence.
    * @param footprint_ids Lanes the footprint touches (computed once per cycle by observe). */
@@ -131,18 +175,7 @@ private:
     const std::unordered_set<lanelet::Id> & sequence_ids,
     const std::vector<lanelet::Id> & footprint_ids);
 
-  double crossing_look_ahead_m_;           // fore/aft reach for the route-sequence membership set,
-                                           // and the boundary-length fallback when no trajectory is
-                                           // available (the departure scan itself uses the planned
-                                           // trajectory's own length)
-  double footprint_boundary_overshoot_m_;  // min body overshoot past the boundary for the footprint
-                                           // (physical) crossing source
-  double
-    predictive_lateral_trigger_distance_m_;  // max nearest distance from the ego footprint to
-                                             // the crossed-side boundary for the predictive
-                                             // (trajectory) source to onset: it fires only once
-                                             // the body has drifted close to the boundary it
-                                             // will cross, not off a dodge merely planned ahead
+  CrossingThresholds thresholds_;
 };
 
 }  // namespace lane_event_classifier

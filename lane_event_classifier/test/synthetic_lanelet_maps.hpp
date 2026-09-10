@@ -20,6 +20,7 @@
 #include <lane_event_classifier/detail/geometry_utils.hpp>
 #include <lane_event_classifier/types.hpp>
 
+#include <autoware_perception_msgs/msg/object_classification.hpp>
 #include <autoware_perception_msgs/msg/predicted_objects.hpp>
 #include <autoware_planning_msgs/msg/lanelet_route.hpp>
 #include <autoware_planning_msgs/msg/trajectory.hpp>
@@ -58,8 +59,7 @@ inline lanelet::LaneletMapPtr make_single_lane_map(lanelet::Id & lane_id_out)
   return map;
 }
 
-// Two lanelets connected end-to-end (lane_a x=[0,10] -> lane_b x=[10,20]), sharing the boundary
-// points at x=10 so the routing graph reports lane_b as a next lane of lane_a.
+// Two lanelets connected end-to-end, so the routing graph reports lane_b as next of lane_a.
 inline lanelet::LaneletMapPtr make_next_lane_map(lanelet::Id & id_a, lanelet::Id & id_b)
 {
   lanelet::Point3d l0(lanelet::utils::getId(), 0.0, 2.0, 0.0);
@@ -190,12 +190,18 @@ inline LaneEventInput make_input(
   return input;
 }
 
-// A static (or optionally moving) bounding-box object at (x, y). Identity orientation keeps the box
-// axis-aligned. Used by the lane-crossing tests to place an obstacle to avoid.
+// An axis-aligned bounding-box object at (x, y), static unless a speed is given.
 inline autoware_perception_msgs::msg::PredictedObject make_object(
-  double x, double y, double size_x = 2.0, double size_y = 2.0, double speed_mps = 0.0)
+  double x, double y, double size_x = 2.0, double size_y = 2.0, double speed_mps = 0.0,
+  uint8_t label = autoware_perception_msgs::msg::ObjectClassification::CAR)
 {
   autoware_perception_msgs::msg::PredictedObject object;
+  // Classified by default: ignored_object_labels filters UNKNOWN, so an unclassified object would
+  // never qualify as a candidate.
+  autoware_perception_msgs::msg::ObjectClassification classification;
+  classification.label = label;
+  classification.probability = 1.0;
+  object.classification.push_back(classification);
   auto & pose = object.kinematics.initial_pose_with_covariance.pose;
   pose.position.x = x;
   pose.position.y = y;
@@ -216,10 +222,7 @@ inline autoware_perception_msgs::msg::PredictedObjects::ConstSharedPtr make_obje
   return message;
 }
 
-// Builds an input carrying an explicit planned trajectory, footprint, turn indicator, and optional
-// perceived objects — used by the trajectory-driven lane-change and lane-crossing tests. The ego
-// pose is the odom position; timing comes from the stamp (advance it between cycles to drive the
-// debounce timers).
+// Builds an input with an explicit trajectory, footprint, turn indicator, and perceived objects.
 inline LaneEventInput make_trajectory_input(
   const std::vector<lanelet::Id> & route_lane_ids, const lanelet::BasicPoint2d & ego,
   int32_t stamp_sec, uint32_t stamp_nanosec,

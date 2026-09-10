@@ -12,11 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Trajectory-driven lane-change tests (see docs/lane_change.md) on the real test map
-// (test/map/lanelet2_map.osm). The primitive sequence 47 -> 1167 -> 51 -> 55 runs in the left lane
-// of the three-lane bundle 47|48|50 (left->right). Trajectories are built from the map's
-// centerlines so the tests carry no hard-coded coordinates; the ego is driven through cycles by
-// advancing the message stamp.
+// Trajectory-driven lane-change tests on the real test map (see docs/lane_change.md).
 
 #include "synthetic_lanelet_maps.hpp"
 
@@ -35,6 +31,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -93,9 +90,7 @@ lanelet::BasicPoint2d nearest_point_on(
   return nearest;
 }
 
-// Builds a trajectory that starts on lane_ids.front() and sweeps laterally through the listed lanes
-// (in order) while advancing forward along the first lane. The forward extent is [start, end] of
-// that lane's centerline arc.
+// Builds a trajectory that sweeps laterally through the listed lanes while advancing forward.
 std::vector<lanelet::BasicPoint2d> build_lane_trajectory(
   const lanelet::LaneletMapPtr & map, const std::vector<lanelet::Id> & lane_ids, double start_frac,
   double end_frac, std::size_t point_count)
@@ -138,29 +133,25 @@ std::vector<lanelet::BasicPoint2d> footprint_box(const lanelet::BasicPoint2d & c
     {center.x() - half, center.y() + half}};
 }
 
-// Drives one cycle exactly as the node does: update the tracker, run the classifier, then hold or
-// release the reference lane based on whether an event is active.
+// Drives one cycle exactly as the node does: update, classify, then hold or release.
 class Simulator
 {
 public:
   Simulator(lanelet::LaneletMapPtr map, LaneChangeConfig config)
-  : classifier_{true, config, tracker_}
+  : classifier_{true, config, tracker_, LaneChangeGeometry{config.crossing_look_ahead_m}}
   {
     const auto result = tracker_.set_lanelet_map(map);
     EXPECT_TRUE(result.has_value());
   }
 
-  uint8_t step(const LaneEventInput & input)
+  std::optional<uint8_t> step(const LaneEventInput & input)
   {
-    tracker_.update(input);
-    classifier_.update(input);
-    const uint8_t state = classifier_.get_state();
+    [[maybe_unused]] const auto update_result = tracker_.update(input);
+    context_.update(tracker_, input);
+    classifier_.update(input, context_);
+    const auto state = classifier_.get_state();
     const bool is_active = state == DS::LANE_CHANGING || state == DS::ABORTING_LANE_CHANGE;
-    if (is_active && !tracker_.is_reference_lane_held()) {
-      tracker_.hold_reference_lane();
-    } else if (!is_active && tracker_.is_reference_lane_held()) {
-      tracker_.release_reference_lane();
-    }
+    tracker_.apply_reference_lane_hold(is_active);
     return state;
   }
 
@@ -171,6 +162,7 @@ public:
 
 private:
   LaneTracker tracker_;
+  LaneEventContext context_;
   LaneChangeClassifier classifier_;
 };
 
@@ -194,8 +186,7 @@ std::pair<int32_t, uint32_t> stamp_from_ms(int64_t total_ms)
 }
 }  // namespace
 
-// Single left change 48 -> 47: the trajectory crosses toward route primitive 47; onset confirms,
-// then the footprint settling fully inside 47 completes the change.
+// Single left change 48 -> 47: onset confirms, then the footprint settles inside 47.
 TEST(LaneChangeTest, single_left_change_onset_then_settle)
 {
   auto map = load_test_map();
@@ -208,13 +199,14 @@ TEST(LaneChangeTest, single_left_change_onset_then_settle)
   const auto ego_in_48 = crossing_trajectory.front();
 
   // Onset: hold the crossing until LANE_CHANGING is confirmed.
-  uint8_t state = DS::UNKNOWN;
+  std::optional<uint8_t> state;
   int64_t time_ms = 0;
   bool became_changing = false;
   for (int cycle = 0; cycle < 10; ++cycle) {
     const auto [sec, nsec] = stamp_from_ms(time_ms);
-    state = sim.step(test_maps::make_trajectory_input(
-      route, ego_in_48, sec, nsec, crossing_trajectory, {ego_in_48}));
+    state = sim.step(
+      test_maps::make_trajectory_input(
+        route, ego_in_48, sec, nsec, crossing_trajectory, {ego_in_48}));
     if (state == DS::LANE_CHANGING) {
       became_changing = true;
       break;
@@ -233,9 +225,10 @@ TEST(LaneChangeTest, single_left_change_onset_then_settle)
   for (int cycle = 0; cycle < 12; ++cycle) {
     time_ms += 100;
     const auto [sec, nsec] = stamp_from_ms(time_ms);
-    state = sim.step(test_maps::make_trajectory_input(
-      route, point_in_47, sec, nsec, settle_trajectory, footprint_47));
-    if (state == DS::UNKNOWN) {
+    state = sim.step(
+      test_maps::make_trajectory_input(
+        route, point_in_47, sec, nsec, settle_trajectory, footprint_47));
+    if (!state) {
       settled = true;
       break;
     }
@@ -244,9 +237,7 @@ TEST(LaneChangeTest, single_left_change_onset_then_settle)
     << "footprint fully inside 47 for the settle window should complete the change";
 }
 
-// Double left change 50 -> 48 -> 47: recognized from the start because the trajectory reaches route
-// primitive 47 within the look-ahead; stays LANE_CHANGING through the non-primitive intermediate
-// lane 48 and settles only at 47.
+// Double left change 50 -> 48 -> 47: stays LANE_CHANGING through 48 and settles only at 47.
 TEST(LaneChangeTest, double_left_change_settles_only_at_route_primitive)
 {
   auto map = load_test_map();
@@ -258,12 +249,13 @@ TEST(LaneChangeTest, double_left_change_settles_only_at_route_primitive)
   const auto crossing_trajectory = build_lane_trajectory(map, {50, 48, 47}, 0.3, 0.9, 30);
   const auto ego_in_50 = crossing_trajectory.front();
 
-  uint8_t state = DS::UNKNOWN;
+  std::optional<uint8_t> state;
   int64_t time_ms = 0;
   for (int cycle = 0; cycle < 10 && state != DS::LANE_CHANGING; ++cycle) {
     const auto [sec, nsec] = stamp_from_ms(time_ms);
-    state = sim.step(test_maps::make_trajectory_input(
-      route, ego_in_50, sec, nsec, crossing_trajectory, {ego_in_50}));
+    state = sim.step(
+      test_maps::make_trajectory_input(
+        route, ego_in_50, sec, nsec, crossing_trajectory, {ego_in_50}));
     time_ms += 100;
   }
   ASSERT_EQ(state, DS::LANE_CHANGING);
@@ -275,8 +267,9 @@ TEST(LaneChangeTest, double_left_change_settles_only_at_route_primitive)
   for (int cycle = 0; cycle < 8; ++cycle) {
     time_ms += 100;
     const auto [sec, nsec] = stamp_from_ms(time_ms);
-    state = sim.step(test_maps::make_trajectory_input(
-      route, point_in_48, sec, nsec, through_48_trajectory, footprint_48));
+    state = sim.step(
+      test_maps::make_trajectory_input(
+        route, point_in_48, sec, nsec, through_48_trajectory, footprint_48));
     EXPECT_EQ(state, DS::LANE_CHANGING) << "must not settle in intermediate lane 48";
   }
 
@@ -288,9 +281,10 @@ TEST(LaneChangeTest, double_left_change_settles_only_at_route_primitive)
   for (int cycle = 0; cycle < 12; ++cycle) {
     time_ms += 100;
     const auto [sec, nsec] = stamp_from_ms(time_ms);
-    state = sim.step(test_maps::make_trajectory_input(
-      route, point_in_47, sec, nsec, settle_trajectory, footprint_47));
-    if (state == DS::UNKNOWN) {
+    state = sim.step(
+      test_maps::make_trajectory_input(
+        route, point_in_47, sec, nsec, settle_trajectory, footprint_47));
+    if (!state) {
       settled = true;
       break;
     }
@@ -298,8 +292,32 @@ TEST(LaneChangeTest, double_left_change_settles_only_at_route_primitive)
   EXPECT_TRUE(settled);
 }
 
-// A crossing from an on-route primitive (47) toward an off-route lane (48) is never a lane change:
-// going straight (47 -> 1167) already keeps the ego on-route (the straight-on-route skip case).
+// Double left change 50 -> 48 -> 47: the reported target is 47, not intermediate lane 48.
+TEST(LaneChangeTest, double_left_change_targets_the_route_primitive)
+{
+  auto map = load_test_map();
+  ASSERT_TRUE(static_cast<bool>(map));
+
+  LaneTracker tracker;
+  ASSERT_TRUE(tracker.set_lanelet_map(map).has_value());
+
+  const std::vector<lanelet::Id> route{route_ids().begin(), route_ids().end()};
+  const auto crossing_trajectory = build_lane_trajectory(map, {50, 48, 47}, 0.3, 0.9, 30);
+  const auto ego_in_50 = crossing_trajectory.front();
+  const auto input =
+    test_maps::make_trajectory_input(route, ego_in_50, 0, 0, crossing_trajectory, {ego_in_50});
+  [[maybe_unused]] const auto update_result = tracker.update(input);
+  ASSERT_EQ(tracker.reference_lane().reference_lane_id, 50);
+
+  const LaneChangeGeometry geometry{make_config().crossing_look_ahead_m};
+  LaneEventContext context;
+  context.update(tracker, input);
+  const auto observation = geometry.observe(tracker, input, context);
+  ASSERT_TRUE(observation.crossing.has_value());
+  EXPECT_EQ(observation.crossing->target_lane_id, 47);
+}
+
+// A crossing from on-route 47 toward off-route 48 is never a lane change (straight-on-route skip).
 TEST(LaneChangeTest, on_route_primitive_crossing_off_route_is_not_lane_change)
 {
   auto map = load_test_map();
@@ -314,15 +332,15 @@ TEST(LaneChangeTest, on_route_primitive_crossing_off_route_is_not_lane_change)
   int64_t time_ms = 0;
   for (int cycle = 0; cycle < 15; ++cycle) {
     const auto [sec, nsec] = stamp_from_ms(time_ms);
-    const uint8_t state = sim.step(test_maps::make_trajectory_input(
-      route, ego_in_47, sec, nsec, crossing_trajectory, {ego_in_47}));
+    const auto state = sim.step(
+      test_maps::make_trajectory_input(
+        route, ego_in_47, sec, nsec, crossing_trajectory, {ego_in_47}));
     EXPECT_NE(state, DS::LANE_CHANGING) << "crossing off-route from an on-route primitive";
     time_ms += 100;
   }
 }
 
-// Abort: after onset, the trajectory swings back into the reference lane (48) -> ABORTING; the
-// footprint fully back inside 48 completes the abort (geometric, no dwell).
+// Abort: the trajectory swings back into reference lane 48, then the footprint follows.
 TEST(LaneChangeTest, abort_when_trajectory_returns_then_geometric_completion)
 {
   auto map = load_test_map();
@@ -334,12 +352,13 @@ TEST(LaneChangeTest, abort_when_trajectory_returns_then_geometric_completion)
   const auto crossing_trajectory = build_lane_trajectory(map, {48, 47}, 0.3, 0.9, 20);
   const auto ego_in_48 = crossing_trajectory.front();
 
-  uint8_t state = DS::UNKNOWN;
+  std::optional<uint8_t> state;
   int64_t time_ms = 0;
   for (int cycle = 0; cycle < 10 && state != DS::LANE_CHANGING; ++cycle) {
     const auto [sec, nsec] = stamp_from_ms(time_ms);
-    state = sim.step(test_maps::make_trajectory_input(
-      route, ego_in_48, sec, nsec, crossing_trajectory, {ego_in_48}));
+    state = sim.step(
+      test_maps::make_trajectory_input(
+        route, ego_in_48, sec, nsec, crossing_trajectory, {ego_in_48}));
     time_ms += 100;
   }
   ASSERT_EQ(state, DS::LANE_CHANGING);
@@ -350,8 +369,9 @@ TEST(LaneChangeTest, abort_when_trajectory_returns_then_geometric_completion)
   for (int cycle = 0; cycle < 10; ++cycle) {
     time_ms += 100;
     const auto [sec, nsec] = stamp_from_ms(time_ms);
-    state = sim.step(test_maps::make_trajectory_input(
-      route, ego_in_48, sec, nsec, return_trajectory, {ego_in_48}));
+    state = sim.step(
+      test_maps::make_trajectory_input(
+        route, ego_in_48, sec, nsec, return_trajectory, {ego_in_48}));
     if (state == DS::ABORTING_LANE_CHANGE) {
       aborting = true;
       break;
@@ -364,13 +384,13 @@ TEST(LaneChangeTest, abort_when_trajectory_returns_then_geometric_completion)
   const auto footprint_48 = footprint_box(point_in_48);
   time_ms += 100;
   const auto [sec, nsec] = stamp_from_ms(time_ms);
-  state = sim.step(test_maps::make_trajectory_input(
-    route, point_in_48, sec, nsec, return_trajectory, footprint_48));
-  EXPECT_EQ(state, DS::UNKNOWN) << "abort completes geometrically with no dwell";
+  state = sim.step(
+    test_maps::make_trajectory_input(
+      route, point_in_48, sec, nsec, return_trajectory, footprint_48));
+  EXPECT_FALSE(state.has_value()) << "abort completes geometrically with no dwell";
 }
 
-// From ABORTING, the trajectory swinging back toward the target lane returns directly to
-// LANE_CHANGING (no trip through lane following).
+// From ABORTING, a trajectory back toward the target returns directly to LANE_CHANGING.
 TEST(LaneChangeTest, aborting_recommits_to_changing)
 {
   auto map = load_test_map();
@@ -383,7 +403,7 @@ TEST(LaneChangeTest, aborting_recommits_to_changing)
   const auto return_trajectory = build_lane_trajectory(map, {48}, 0.3, 0.9, 20);
   const auto ego_in_48 = crossing_trajectory.front();
 
-  uint8_t state = DS::UNKNOWN;
+  std::optional<uint8_t> state;
   int64_t time_ms = 0;
   auto run = [&](const std::vector<lanelet::BasicPoint2d> & trajectory, int cycles, uint8_t until) {
     for (int cycle = 0; cycle < cycles; ++cycle) {
@@ -403,8 +423,7 @@ TEST(LaneChangeTest, aborting_recommits_to_changing)
   EXPECT_TRUE(run(crossing_trajectory, 10, DS::LANE_CHANGING)) << "re-commit from ABORTING";
 }
 
-// Blinker confidence signal: with the footprint straddling 48/47 (so the footprint-off-route signal
-// is inactive), the blinker toward the target shortens the onset window versus no blinker.
+// Blinker confidence signal: with the footprint straddling 48/47, the blinker shortens onset.
 TEST(LaneChangeTest, blinker_confidence_signal_shortens_onset_window)
 {
   auto map = load_test_map();
@@ -414,8 +433,7 @@ TEST(LaneChangeTest, blinker_confidence_signal_shortens_onset_window)
   const auto crossing_trajectory = build_lane_trajectory(map, {48, 47}, 0.3, 0.9, 20);
   const auto ego_in_48 = crossing_trajectory.front();
 
-  // Footprint with one corner in 48 and one in 47 -> not fully off the route primitives, so the
-  // footprint-off-route signal is inactive and the blinker is the only confidence signal.
+  // One corner in 48 and one in 47, so the blinker is the only confidence signal.
   const auto point_in_48 = point_at_fraction(centerline_points(map, 48), 0.4);
   const auto point_in_47 = nearest_point_on(centerline_points(map, 47), point_in_48);
   const std::vector<lanelet::BasicPoint2d> straddling_footprint{point_in_48, point_in_47};
@@ -425,8 +443,9 @@ TEST(LaneChangeTest, blinker_confidence_signal_shortens_onset_window)
     int64_t time_ms = 0;
     for (int cycle = 0; cycle < 20; ++cycle) {
       const auto [sec, nsec] = stamp_from_ms(time_ms);
-      const uint8_t state = sim.step(test_maps::make_trajectory_input(
-        route, ego_in_48, sec, nsec, crossing_trajectory, straddling_footprint, turn_indicator));
+      const auto state = sim.step(
+        test_maps::make_trajectory_input(
+          route, ego_in_48, sec, nsec, crossing_trajectory, straddling_footprint, turn_indicator));
       if (state == DS::LANE_CHANGING) {
         return cycle;
       }
@@ -439,6 +458,44 @@ TEST(LaneChangeTest, blinker_confidence_signal_shortens_onset_window)
   const int cycles_with_blinker = onset_cycle(TurnIndicatorsReport::ENABLE_LEFT);
   EXPECT_LT(cycles_with_blinker, cycles_no_blinker)
     << "blinker toward the target should shorten the onset window";
+}
+
+// An empty footprint must not read as "off the route primitives" and shorten the onset window.
+TEST(LaneChangeTest, empty_footprint_is_not_a_confidence_signal)
+{
+  auto map = load_test_map();
+  ASSERT_TRUE(static_cast<bool>(map));
+
+  const std::vector<lanelet::Id> route{route_ids().begin(), route_ids().end()};
+  const auto crossing_trajectory = build_lane_trajectory(map, {48, 47}, 0.3, 0.9, 20);
+  const auto ego_in_48 = crossing_trajectory.front();
+
+  // Baseline: footprint straddling 48/47 is genuinely not off the route primitives.
+  const auto point_in_48 = point_at_fraction(centerline_points(map, 48), 0.4);
+  const auto point_in_47 = nearest_point_on(centerline_points(map, 47), point_in_48);
+  const std::vector<lanelet::BasicPoint2d> straddling_footprint{point_in_48, point_in_47};
+
+  auto onset_cycle = [&](const std::vector<lanelet::BasicPoint2d> & footprint) {
+    Simulator sim{map, make_config()};
+    int64_t time_ms = 0;
+    for (int cycle = 0; cycle < 20; ++cycle) {
+      const auto [sec, nsec] = stamp_from_ms(time_ms);
+      const auto state = sim.step(
+        test_maps::make_trajectory_input(
+          route, ego_in_48, sec, nsec, crossing_trajectory, footprint,
+          TurnIndicatorsReport::DISABLE));
+      if (state == DS::LANE_CHANGING) {
+        return cycle;
+      }
+      time_ms += 100;
+    }
+    return 999;
+  };
+
+  const int cycles_straddling = onset_cycle(straddling_footprint);
+  const int cycles_empty_footprint = onset_cycle({});
+  EXPECT_EQ(cycles_empty_footprint, cycles_straddling)
+    << "an empty footprint must not be read as \"off the route primitives\"";
 }
 
 }  // namespace lane_event_classifier

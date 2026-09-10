@@ -12,38 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <lane_event_classifier/detail/geometry_utils.hpp>
 #include <lane_event_classifier/lane_crossing/classifier.hpp>
-#include <rclcpp/time.hpp>
-
-#include <autoware_vehicle_msgs/msg/turn_indicators_report.hpp>
 
 #include <fmt/format.h>
 
+#include <optional>
 #include <utility>
 #include <vector>
 
 namespace lane_event_classifier
 {
-
-namespace
-{
-using autoware_vehicle_msgs::msg::TurnIndicatorsReport;
-
-double stamp_to_seconds(const LaneEventInput & input)
-{
-  return rclcpp::Time(input.odometry_ptr->header.stamp).seconds();
-}
-
-// Confidence signal (docs/lane_crossing.md, "Confidence signal"): the blinker is on toward the side
-// the crossing heads to (the driver signals toward the dodge on the way out).
-bool is_blinker_toward_crossing_side(const LaneCrossingCrossing & crossing, uint8_t turn_indicator)
-{
-  if (crossing.is_to_left) {
-    return turn_indicator == TurnIndicatorsReport::ENABLE_LEFT;
-  }
-  return turn_indicator == TurnIndicatorsReport::ENABLE_RIGHT;
-}
-}  // namespace
 
 IntentionalCrossingClassifier::IntentionalCrossingClassifier(
   bool enabled, LaneCrossingConfig config, const LaneTracker & tracker,
@@ -58,51 +37,46 @@ IntentionalCrossingClassifier::IntentionalCrossingClassifier(
 
 void IntentionalCrossingClassifier::reset_timers()
 {
-  tracked_crossing_.reset();
-  crossing_start_s_ = 0.0;
-  return_active_ = false;
-  return_start_s_ = 0.0;
+  crossing_signal_.reset();
+  return_signal_.reset();
   remembered_candidate_poses_.clear();
   last_candidate_seen_s_ = 0.0;
 }
 
 bool IntentionalCrossingClassifier::accumulate_crossing(
-  const LaneCrossingCrossing & crossing, double now_s, bool has_confidence_signal)
+  const std::optional<LaneCrossingCrossing> & crossing, double now_s, bool has_confidence_signal)
 {
   // Persistence (docs/lane_crossing.md, "Persistence"): same side + stable crossing point.
-  const bool matches_tracked =
-    tracked_crossing_ && tracked_crossing_->is_to_left == crossing.is_to_left &&
-    (crossing.crossing_point - tracked_crossing_->crossing_point).norm() <=
-      config_.crossing_position_tolerance_m;
-  if (!matches_tracked) {
-    tracked_crossing_ = crossing;  // anchor the crossing location; restart the window
-    crossing_start_s_ = now_s;
-  }
+  const auto matches_tracked =
+    [this](const LaneCrossingCrossing & tracked, const LaneCrossingCrossing & current) {
+      if (tracked.is_to_left != current.is_to_left) {
+        return false;
+      }
+      // The two onset sources measure different points - the trajectory exit versus the deepest
+      // footprint corner - metres apart on the same crossing. A source flip continues the crossing
+      // rather than starting a new one, so the position tolerance only applies within one source.
+      if (tracked.is_from_trajectory_source != current.is_from_trajectory_source) {
+        return true;
+      }
+      return (current.crossing_point - tracked.crossing_point).norm() <=
+             config_.crossing_position_tolerance_m;
+    };
 
   // Confidence signal (docs/lane_crossing.md, "Confidence signal"): shortens the window.
   const double effective_persist_duration =
     config_.crossing_persist_duration_s * (has_confidence_signal ? config_.confidence_factor : 1.0);
-  return (now_s - crossing_start_s_) >= effective_persist_duration;
-}
-
-bool IntentionalCrossingClassifier::accumulate_return(
-  const LaneCrossingObservation & observation, double now_s)
-{
-  if (!observation.is_footprint_inside_reference_sequence) {
-    return_active_ = false;
-    return false;
-  }
-  if (!return_active_) {
-    return_active_ = true;
-    return_start_s_ = now_s;
-  }
-  return (now_s - return_start_s_) >= config_.settle_confirm_duration_s;
+  // The two onset sources cover different parts of one manoeuvre and each drops a cycle at the
+  // hand-over, so a gap shorter than the persistence window itself does not break persistence.
+  return crossing_signal_.update(
+    crossing, now_s, effective_persist_duration, matches_tracked,
+    config_.crossing_persist_duration_s);
 }
 
 bool IntentionalCrossingClassifier::has_confidence_signal(
   const LaneEventInput & input, const LaneCrossingCrossing & crossing)
 {
-  return is_blinker_toward_crossing_side(crossing, input.turn_indicator);
+  // Confidence signal (docs/lane_crossing.md, "Confidence signal"): blinker toward the dodge.
+  return is_blinker_toward_side(crossing.is_to_left, input.turn_indicator);
 }
 
 std::vector<geometry_msgs::msg::Pose>
@@ -124,13 +98,15 @@ IntentionalCrossingClassifier::effective_candidate_object_poses(
   return {};
 }
 
-void IntentionalCrossingClassifier::update(const LaneEventInput & input)
+void IntentionalCrossingClassifier::update(
+  const LaneEventInput & input, const LaneEventContext & context)
 {
   const double now_s = stamp_to_seconds(input);
   const LaneCrossingObjects::Result objects = objects_.observe(tracker_, input);
   const auto candidate_poses =
     effective_candidate_object_poses(objects.candidate_object_poses, now_s);
-  const LaneCrossingObservation observation = geometry_.observe(tracker_, input, candidate_poses);
+  const LaneCrossingObservation observation =
+    geometry_.observe(tracker_, input, context, candidate_poses);
 
   switch (phase_) {
     case Phase::idle:
@@ -140,35 +116,47 @@ void IntentionalCrossingClassifier::update(const LaneEventInput & input)
       detect_completion(observation, now_s);
       break;
   }
+
+  // The candidate-object scan is what gates both onset sources, so carry its breakdown into the
+  // per-cycle reason while idle (in the crossing phase the reason only marks transitions).
+  if (phase_ == Phase::idle) {
+    debug_reason_ = fmt::format("{} | objects: {}", debug_reason_, objects.debug_diagnostic);
+  }
 }
 
 void IntentionalCrossingClassifier::detect_onset(
   const LaneEventInput & input, const LaneCrossingObservation & observation, double now_s)
 {
   // Onset (docs/lane_crossing.md, "Onset"): the candidate requirement is folded into the crossing.
+  // A missing crossing is fed through the signal rather than resetting it, so the grace window can
+  // bridge the gap between the predictive and the physical source.
+  const bool confidence =
+    observation.crossing && has_confidence_signal(input, *observation.crossing);
+  if (accumulate_crossing(observation.crossing, now_s, confidence)) {
+    debug_reason_ = fmt::format(
+      "onset ({}): {}", observation.crossing ? "this cycle" : "bridged dropout",
+      observation.debug_crossing_diagnostic);
+    phase_ = Phase::crossing;
+    reset_timers();
+    return;
+  }
+  // Every idle path assigns the reason, so update() can extend it without accumulating stale text.
   if (!observation.crossing) {
-    tracked_crossing_.reset();
     // Per-cycle diagnostic (surfaced throttled by the node): why onset did not fire this cycle.
     debug_reason_ = fmt::format(
       "idle: on_route_straight={} | crossing: {}", observation.is_on_route_straight ? "yes" : "no",
-      observation.crossing_diagnostic);
+      observation.debug_crossing_diagnostic);
     return;
   }
-  const bool confidence = has_confidence_signal(input, *observation.crossing);
-  if (accumulate_crossing(*observation.crossing, now_s, confidence)) {
-    debug_reason_ = fmt::format(
-      "onset: trajectory brackets a candidate object, crossing the {} boundary",
-      tracked_crossing_->is_to_left ? "left" : "right");
-    phase_ = Phase::crossing;
-    reset_timers();
-  }
+  debug_reason_ = fmt::format(
+    "accumulating (confidence={}): {}", confidence ? "yes" : "no",
+    observation.debug_crossing_diagnostic);
 }
 
 void IntentionalCrossingClassifier::detect_completion(
   const LaneCrossingObservation & observation, double now_s)
 {
-  // Finishing (docs/lane_crossing.md, "Finishing"): end once fully inside one lane; full entry
-  // checked before return, else hold. No time cap.
+  // Finishing (docs/lane_crossing.md, "Finishing"): end once fully inside one lane. No time cap.
 
   // Full entry: the ego is fully in the neighbour, hand the move to the lane-change classifier.
   if (observation.full_entry_lane_id) {
@@ -181,7 +169,9 @@ void IntentionalCrossingClassifier::detect_completion(
   }
 
   // Return: footprint fully back inside the route straight sequence for the settle window.
-  if (accumulate_return(observation, now_s)) {
+  if (persists(
+        return_signal_, observation.is_footprint_inside_reference_sequence, now_s,
+        config_.settle_confirm_duration_s)) {
     debug_reason_ = "completed: footprint returned fully into the route sequence";
     phase_ = Phase::idle;
     reset_timers();
@@ -191,15 +181,15 @@ void IntentionalCrossingClassifier::detect_completion(
   // Otherwise straddling: not fully inside any lane yet, so hold the crossing.
 }
 
-uint8_t IntentionalCrossingClassifier::get_state() const
+std::optional<uint8_t> IntentionalCrossingClassifier::get_state() const
 {
   switch (phase_) {
     case Phase::crossing:
       return DrivingState::INTENTIONAL_LANE_CROSSING;
     case Phase::idle:
     default:
-      // No crossing event: UNKNOWN (the node falls back to the lane-following check).
-      return DrivingState::UNKNOWN;
+      // No crossing event; the node falls back to the lane-following check.
+      return std::nullopt;
   }
 }
 

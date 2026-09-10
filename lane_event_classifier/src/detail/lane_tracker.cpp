@@ -13,6 +13,10 @@
 // limitations under the License.
 
 #include <autoware/lanelet2_utils/conversion.hpp>
+#include <autoware/lanelet2_utils/intersection.hpp>
+#include <autoware/lanelet2_utils/kind.hpp>
+#include <autoware/lanelet2_utils/nn_search.hpp>
+#include <autoware/lanelet2_utils/topology.hpp>
 #include <lane_event_classifier/detail/geometry_utils.hpp>
 #include <lane_event_classifier/detail/lane_sequence.hpp>
 #include <lane_event_classifier/detail/lane_tracker.hpp>
@@ -23,7 +27,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -32,6 +35,7 @@
 
 namespace lane_event_classifier
 {
+namespace lanelet2_utils = autoware::experimental::lanelet2_utils;
 
 tl::expected<void, std::string> LaneTracker::set_lanelet_map(
   const lanelet::LaneletMapPtr & lanelet_map_ptr)
@@ -46,11 +50,24 @@ tl::expected<void, std::string> LaneTracker::set_lanelet_map(
   std::tie(routing_graph_ptr_, traffic_rules_ptr_) =
     autoware::experimental::lanelet2_utils::instantiate_routing_graph_and_traffic_rules(
       lanelet_map_ptr_);
-  // The routing graph changed, so any memoized straight lane sequence is stale.
-  cached_lane_sequence_source_id_ = lanelet::InvalId;
-  cached_lane_sequence_look_ahead_m_ = -1.0;
-  cached_lane_sequence_ids_.clear();
   return {};
+}
+
+void LaneTracker::apply_reference_lane_hold(bool is_hold_requested)
+{
+  if (is_hold_requested && !is_reference_lane_held_) {
+    is_reference_lane_held_ = true;
+    return;
+  }
+  if (!is_reference_lane_held_) {
+    return;
+  }
+  // A held shoulder or intersection lane always thaws (README.md, "Holding the reference lane").
+  const bool must_release = !is_hold_requested || reference_lane_.is_reference_lane_road_shoulder ||
+                            reference_lane_.is_reference_lane_intersection;
+  if (must_release) {
+    release_reference_lane();
+  }
 }
 
 void LaneTracker::release_reference_lane()
@@ -136,29 +153,10 @@ std::vector<lanelet::Id> LaneTracker::next_lane_ids(lanelet::Id lane_id) const
   if (!routing_graph_ptr_ || !lane) {
     return ids;
   }
-  for (const auto & next_lane : routing_graph_ptr_->following(*lane)) {
+  for (const auto & next_lane : lanelet2_utils::following_lanelets(*lane, routing_graph_ptr_)) {
     ids.push_back(next_lane.id());
   }
   return ids;
-}
-
-const std::unordered_set<lanelet::Id> & LaneTracker::straight_lane_sequence_ids(
-  const lanelet::ConstLanelet & lane, double look_ahead_m) const
-{
-  // Reuse the memoized lane sequence while the queried lane and look-ahead are unchanged;
-  // look_ahead_m is a fixed configuration value, so the exact comparison always holds on a cache
-  // hit.
-  if (
-    lane.id() == cached_lane_sequence_source_id_ &&
-    look_ahead_m == cached_lane_sequence_look_ahead_m_) {
-    return cached_lane_sequence_ids_;
-  }
-
-  cached_lane_sequence_ids_ =
-    get_straight_lane_sequence_ids(lane, routing_graph_ptr_, look_ahead_m);
-  cached_lane_sequence_source_id_ = lane.id();
-  cached_lane_sequence_look_ahead_m_ = look_ahead_m;
-  return cached_lane_sequence_ids_;
 }
 
 lanelet::ConstLanelets LaneTracker::get_forward_route_lane_sequence(
@@ -173,10 +171,7 @@ lanelet::ConstLanelets LaneTracker::get_forward_route_lane_sequence(
   std::unordered_set<lanelet::Id> visited_ids{reference_lane_id};
   lanelet::Id current_id = reference_lane_id;
 
-  // Walk the on-route straight continuation, adding a full window of downstream length beyond the
-  // reference lane: the ego can be anywhere along the reference lane, so covering that extra window
-  // guarantees an object (or a dodge crossing) up to downstream_length_m ahead of the ego is in the
-  // sequence. Under the onset scope gate a route-primitive successor exists at each straight step.
+  // Walk the on-route straight continuation, adding a full window beyond the reference lane.
   double downstream_length = 0.0;
   while (downstream_length < downstream_length_m) {
     const auto next_ids = next_lane_ids(current_id);
@@ -217,16 +212,8 @@ bool LaneTracker::is_route_primitive(lanelet::Id lane_id) const
 bool LaneTracker::is_lane_directly_connected(
   lanelet::Id from_lane_id, lanelet::Id candidate_lane_id) const
 {
-  if (!routing_graph_ptr_ || !lanelet_exists(from_lane_id)) {
-    return false;
-  }
-  const auto from_lane = lanelet_map_ptr_->laneletLayer.get(from_lane_id);
-  const auto next_lanes = routing_graph_ptr_->following(from_lane);
-  return std::any_of(
-    next_lanes.cbegin(), next_lanes.cend(),
-    [candidate_lane_id](const lanelet::ConstLanelet & next_lane) {
-      return next_lane.id() == candidate_lane_id;
-    });
+  const auto next_ids = next_lane_ids(from_lane_id);
+  return std::find(next_ids.cbegin(), next_ids.cend(), candidate_lane_id) != next_ids.cend();
 }
 
 std::optional<lanelet::Id> LaneTracker::select_current_lane_id(const LaneEventInput & input) const
@@ -234,7 +221,7 @@ std::optional<lanelet::Id> LaneTracker::select_current_lane_id(const LaneEventIn
   const auto & odom_pos = input.odometry_ptr->pose.pose.position;
   const lanelet::BasicPoint2d ego_pt{odom_pos.x, odom_pos.y};
 
-  // Prefer a route primitive the ego is inside; R-tree query avoids a whole-map scan each cycle.
+  // Prefer a route primitive the ego is inside; the R-tree query avoids a whole-map scan.
   const lanelet::BoundingBox2d query_box(ego_pt, ego_pt);
   std::optional<lanelet::Id> off_route_lane_id;
   for (const auto & candidate_lane : lanelet_map_ptr_->laneletLayer.search(query_box)) {
@@ -253,75 +240,103 @@ std::optional<lanelet::Id> LaneTracker::select_current_lane_id(const LaneEventIn
   }
 
   // Fall back to the nearest route primitive (ego between lanelets, e.g. at a boundary).
-  std::optional<lanelet::Id> nearest_lane_id;
-  double min_dist_to_nearest_lane = std::numeric_limits<double>::max();
-  for (const auto & segment : input.route_ptr->segments) {
-    const auto candidate_lane_id = static_cast<lanelet::Id>(segment.preferred_primitive.id);
-    if (!lanelet_exists(candidate_lane_id)) {
-      continue;
-    }
-    const auto candidate_lane = lanelet_map_ptr_->laneletLayer.get(candidate_lane_id);
-    const double dist_to_candidate = lanelet::geometry::distance2d(candidate_lane, ego_pt);
-    if (dist_to_candidate < min_dist_to_nearest_lane) {
-      min_dist_to_nearest_lane = dist_to_candidate;
-      nearest_lane_id = candidate_lane_id;
+  std::vector<lanelet::Id> existing_route_ids;
+  existing_route_ids.reserve(route_primitive_ids_.size());
+  for (const auto id : route_primitive_ids_) {
+    if (lanelet_exists(id)) {
+      existing_route_ids.push_back(id);
     }
   }
-  return nearest_lane_id;
+  const auto route_lanelets = lanelet2_utils::from_ids(lanelet_map_ptr_, existing_route_ids);
+  const auto nearest_lane =
+    lanelet2_utils::get_closest_lanelet(route_lanelets, input.odometry_ptr->pose.pose);
+  return nearest_lane ? std::optional<lanelet::Id>{nearest_lane->id()} : std::nullopt;
 }
 
-void LaneTracker::update(const LaneEventInput & input)
+tl::expected<void, std::string> LaneTracker::update(const LaneEventInput & input)
 {
-  refresh_route_primitive_cache(input);
-  is_last_reanchor_blocked_ = false;
-  if (!is_reference_lane_held_) {
-    refresh_reference_lane(input);
-  }
-}
-
-void LaneTracker::refresh_route_primitive_cache(const LaneEventInput & input)
-{
-  // The node only replaces route_ptr on a new route (uuid change), so pointer identity is a stable
-  // cache key: rebuild the primitive-id set only when it flips.
-  if (input.route_ptr == cached_route_ptr_) {
-    return;
-  }
-  cached_route_ptr_ = input.route_ptr;
-  route_primitive_ids_.clear();
   if (!input.route_ptr) {
-    return;
+    return tl::make_unexpected<std::string>("Empty route ptr.");
   }
-  route_primitive_ids_.reserve(input.route_ptr->segments.size());
-  for (const auto & segment : input.route_ptr->segments) {
-    route_primitive_ids_.insert(static_cast<lanelet::Id>(segment.preferred_primitive.id));
+
+  if (cached_route_ptr_ != input.route_ptr) {
+    cached_route_ptr_ = input.route_ptr;
+    route_primitive_ids_ = update_primitive_route_ids(cached_route_ptr_);
   }
+
+  debug_is_last_reanchor_blocked_ = false;
+
+  // A held reference lane is normal during an event (README.md, "Holding the reference lane").
+  if (is_reference_lane_held_) {
+    return {};
+  }
+
+  if (const auto updated_lane_id_opt = new_reference_lane_id(input)) {
+    if (const auto lane_opt = get_lanelet(*updated_lane_id_opt)) {
+      reference_lane_ = set_reference_lane(*lane_opt);
+    }
+  }
+
+  return {};
 }
 
-void LaneTracker::refresh_reference_lane(const LaneEventInput & input)
+std::unordered_set<lanelet::Id> LaneTracker::update_primitive_route_ids(
+  const autoware_planning_msgs::msg::LaneletRoute::ConstSharedPtr & route_ptr) const
+{
+  std::unordered_set<lanelet::Id> primitive_route_ids;
+
+  primitive_route_ids.reserve(route_ptr->segments.size());
+  for (const auto & segment : route_ptr->segments) {
+    primitive_route_ids.insert(static_cast<lanelet::Id>(segment.preferred_primitive.id));
+  }
+
+  return primitive_route_ids;
+}
+
+std::optional<lanelet::Id> LaneTracker::new_reference_lane_id(const LaneEventInput & input) const
 {
   const auto selected_lane_id = select_current_lane_id(input);
-  last_selected_lane_id_ = selected_lane_id.value_or(lanelet::InvalId);
+  debug_last_selected_lane_id_ = selected_lane_id.value_or(lanelet::InvalId);
   if (!selected_lane_id) {
-    return;  // keep the previous reference lane if we cannot resolve a lane this cycle
+    return std::nullopt;  // keep the previous reference lane if we cannot resolve a lane this cycle
   }
   const lanelet::Id current_lane_id = *selected_lane_id;
 
-  // Re-anchor on the first selection, or when the ego advances into a next lane.
   // A lateral move keeps the reference lane, so a lane change is not misread as forward progress.
   const bool is_reference_lane_unset = reference_lane_.reference_lane_id == lanelet::InvalId;
   const bool is_advancing_to_next_lane =
     !is_reference_lane_unset && current_lane_id != reference_lane_.reference_lane_id &&
     is_lane_directly_connected(reference_lane_.reference_lane_id, current_lane_id);
-  if (!is_reference_lane_unset && !is_advancing_to_next_lane) {
-    // Ego is in a lane that is neither the reference lane nor a next lane of it: the reference lane
-    // cannot advance.
-    is_last_reanchor_blocked_ = current_lane_id != reference_lane_.reference_lane_id;
-    return;
+  // A shoulder has no routing successor; see README.md, "Holding the reference lane".
+  const bool is_leaving_road_shoulder = !is_reference_lane_unset &&
+                                        reference_lane_.is_reference_lane_road_shoulder &&
+                                        current_lane_id != reference_lane_.reference_lane_id;
+  if (!is_reference_lane_unset && !is_advancing_to_next_lane && !is_leaving_road_shoulder) {
+    // Neither the reference lane nor a next lane of it, so the reference lane cannot advance.
+    debug_is_last_reanchor_blocked_ = current_lane_id != reference_lane_.reference_lane_id;
+    return std::nullopt;
   }
 
-  const bool is_current_lane_on_route = is_route_primitive(current_lane_id);
-  reference_lane_.reference_lane_id = current_lane_id;
-  reference_lane_.is_reference_lane_on_route = is_current_lane_on_route;
+  return current_lane_id;
+}
+
+ReferenceLane LaneTracker::set_reference_lane(
+  const lanelet::ConstLanelet & new_reference_lane) const
+{
+  ReferenceLane reference_lane;
+  reference_lane.reference_lane_id = new_reference_lane.id();
+  reference_lane.debug_is_reference_lane_on_route = is_route_primitive(new_reference_lane.id());
+
+  reference_lane.is_reference_lane_road_shoulder =
+    lanelet2_utils::is_shoulder_lane(new_reference_lane);
+  reference_lane.is_reference_lane_intersection =
+    lanelet2_utils::is_intersection_lanelet(new_reference_lane);
+  reference_lane.is_reference_lane_left_bound_virtual =
+    is_virtual_linestring(new_reference_lane.leftBound());
+  reference_lane.is_reference_lane_right_bound_virtual =
+    is_virtual_linestring(new_reference_lane.rightBound());
+
+  return reference_lane;
 }
 
 }  // namespace lane_event_classifier
