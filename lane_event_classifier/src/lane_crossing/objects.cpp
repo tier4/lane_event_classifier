@@ -17,8 +17,11 @@
 #include <autoware_utils_geometry/boost_polygon_utils.hpp>
 #include <lane_event_classifier/lane_crossing/objects.hpp>
 
+#include <autoware_perception_msgs/msg/object_classification.hpp>
+
 #include <boost/geometry/algorithms/correct.hpp>
 #include <boost/geometry/algorithms/disjoint.hpp>
+#include <boost/geometry/algorithms/distance.hpp>
 
 #include <fmt/format.h>
 #include <lanelet2_core/geometry/Lanelet.h>
@@ -27,6 +30,9 @@
 #include <cmath>
 #include <iterator>
 #include <limits>
+#include <optional>
+#include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -63,16 +69,51 @@ std::vector<Polygon2d> to_lane_sequence_polygons(const lanelet::ConstLanelets & 
   return polygons;
 }
 
-// True when the object footprint touches any lane-sequence polygon (a bare boundary graze counts).
-bool object_touches_lane_sequence(
-  const PredictedObject & object, const std::vector<Polygon2d> & lane_sequence_polygons)
+// True when the object footprint reaches any lane-sequence polygon, allowing lateral_buffer_m of
+// slack so an obstacle parked just past the boundary still qualifies (a bare graze counts).
+bool object_reaches_lane_sequence(
+  const PredictedObject & object, const std::vector<Polygon2d> & lane_sequence_polygons,
+  double lateral_buffer_m)
 {
   const auto object_polygon = autoware_utils_geometry::to_polygon2d(object);
   return std::any_of(
     lane_sequence_polygons.cbegin(), lane_sequence_polygons.cend(),
-    [&object_polygon](const auto & lane_sequence_polygon) {
-      return !boost::geometry::disjoint(object_polygon, lane_sequence_polygon);
+    [&object_polygon, lateral_buffer_m](const auto & lane_sequence_polygon) {
+      if (!boost::geometry::disjoint(object_polygon, lane_sequence_polygon)) {
+        return true;
+      }
+      return boost::geometry::distance(object_polygon, lane_sequence_polygon) <= lateral_buffer_m;
     });
+}
+
+// The classification the object is most likely to be; UNKNOWN when it carries none.
+uint8_t highest_probability_label(const PredictedObject & object)
+{
+  using autoware_perception_msgs::msg::ObjectClassification;
+  if (object.classification.empty()) {
+    return ObjectClassification::UNKNOWN;
+  }
+  return std::max_element(
+           object.classification.cbegin(), object.classification.cend(),
+           [](const auto & a, const auto & b) { return a.probability < b.probability; })
+    ->label;
+}
+
+// The ObjectClassification value for a schema label name, or nullopt when the name is unknown.
+std::optional<uint8_t> label_value(const std::string & label_name)
+{
+  using autoware_perception_msgs::msg::ObjectClassification;
+  static const std::vector<std::pair<std::string, uint8_t>> names{
+    {"UNKNOWN", ObjectClassification::UNKNOWN}, {"CAR", ObjectClassification::CAR},
+    {"TRUCK", ObjectClassification::TRUCK},     {"BUS", ObjectClassification::BUS},
+    {"TRAILER", ObjectClassification::TRAILER}, {"MOTORCYCLE", ObjectClassification::MOTORCYCLE},
+    {"BICYCLE", ObjectClassification::BICYCLE}, {"PEDESTRIAN", ObjectClassification::PEDESTRIAN}};
+  const auto found = std::find_if(
+    names.cbegin(), names.cend(), [&](const auto & entry) { return entry.first == label_name; });
+  if (found == names.cend()) {
+    return std::nullopt;
+  }
+  return found->second;
 }
 
 double object_speed_mps(const PredictedObject & object)
@@ -91,9 +132,19 @@ double arc_distance_ahead_of_ego(
 }
 }  // namespace
 
-LaneCrossingObjects::LaneCrossingObjects(double object_longitudinal_window_m)
-: object_longitudinal_window_m_{object_longitudinal_window_m}
+LaneCrossingObjects::LaneCrossingObjects(
+  double object_longitudinal_window_m, double object_lateral_buffer_m,
+  const std::vector<std::string> & ignored_object_labels)
+: object_longitudinal_window_m_{object_longitudinal_window_m},
+  object_lateral_buffer_m_{object_lateral_buffer_m}
 {
+  // The schema restricts the names to the ObjectClassification set, so an unmapped one is dropped
+  // rather than silently widening the filter.
+  for (const auto & label_name : ignored_object_labels) {
+    if (const auto value = label_value(label_name)) {
+      ignored_labels_.insert(*value);
+    }
+  }
 }
 
 bool LaneCrossingObjects::object_is_ahead_within_window(double arc_distance_ahead_m) const
@@ -110,8 +161,12 @@ LaneCrossingObjects::LaneSequenceScan LaneCrossingObjects::scan_lane_sequence_ob
   LaneSequenceScan scan;
   double debug_nearest_ahead_m = std::numeric_limits<double>::max();
   for (const auto & object : objects) {
-    // Candidate object (docs/lane_crossing.md, "Onset"): on the sequence, ahead within the window.
-    if (!object_touches_lane_sequence(object, lane_sequence_polygons)) {
+    // Candidate object (docs/lane_crossing.md, "Onset"): a qualifying class, on the sequence within
+    // the lateral buffer, ahead within the longitudinal window.
+    if (ignored_labels_.count(highest_probability_label(object)) != 0) {
+      continue;
+    }
+    if (!object_reaches_lane_sequence(object, lane_sequence_polygons, object_lateral_buffer_m_)) {
       continue;
     }
     ++scan.debug_lane_sequence_object_count;
@@ -156,12 +211,15 @@ LaneCrossingObjects::Result LaneCrossingObjects::observe(
       {},
       fmt::format("{} objects, none touch the lane sequence", input.objects_ptr->objects.size())};
   }
+  // Read the count before the move: a braced-init-list is sequenced left to right, so reading
+  // scan.candidate_object_poses.size() after std::move would always report 0.
+  const auto candidate_count = scan.candidate_object_poses.size();
   return {
     std::move(scan.candidate_object_poses),
     fmt::format(
       "lane_sequence_objects={} candidates={} nearest_ahead={:.1f}m (speed={:.1f}mps)",
-      scan.debug_lane_sequence_object_count, scan.candidate_object_poses.size(),
-      scan.debug_nearest_ahead_m, scan.debug_nearest_ahead_speed_mps)};
+      scan.debug_lane_sequence_object_count, candidate_count, scan.debug_nearest_ahead_m,
+      scan.debug_nearest_ahead_speed_mps)};
 }
 
 }  // namespace lane_event_classifier

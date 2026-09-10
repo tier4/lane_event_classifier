@@ -23,7 +23,9 @@
 
 #include <lanelet2_core/primitives/Lanelet.h>
 
+#include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace lane_event_classifier
@@ -33,7 +35,14 @@ namespace lane_event_classifier
 class LaneCrossingObjects
 {
 public:
-  explicit LaneCrossingObjects(double object_longitudinal_window_m);
+  /**
+   * @param object_longitudinal_window_m Ahead-of-ego arc window for a candidate object.
+   * @param object_lateral_buffer_m Lateral slack outside the lane-sequence polygons.
+   * @param ignored_object_labels Classification names that never qualify (e.g. "UNKNOWN").
+   */
+  LaneCrossingObjects(
+    double object_longitudinal_window_m, double object_lateral_buffer_m,
+    const std::vector<std::string> & ignored_object_labels);
 
   /** @brief The candidate objects for one cycle (returned by value; no out-params). */
   struct Result
@@ -68,7 +77,9 @@ private:
   /** @brief True when the object lies ahead of the ego within the longitudinal window. */
   [[nodiscard]] bool object_is_ahead_within_window(double arc_distance_ahead_m) const;
 
-  double object_longitudinal_window_m_;  // ahead-of-ego arc window for a candidate object
+  double object_longitudinal_window_m_;         // ahead-of-ego arc window for a candidate object
+  double object_lateral_buffer_m_;              // lateral slack outside the lane-sequence polygons
+  std::unordered_set<uint8_t> ignored_labels_;  // classifications that never qualify
 };
 
 }  // namespace lane_event_classifier

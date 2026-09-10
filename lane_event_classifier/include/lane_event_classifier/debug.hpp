@@ -44,6 +44,14 @@ public:
   explicit LaneEventClassifierDebug(rclcpp::Node & node);
 
   /**
+   * @brief Enables or disables the per-cycle diagnostics (enable_debug_log).
+   *
+   * State transitions, reference-lane re-anchoring, and missing-input warnings are unaffected;
+   * only the once-per-second-per-classifier reason strings are gated.
+   */
+  void set_debug_log_enabled(bool enabled) { debug_log_enabled_ = enabled; }
+
+  /**
    * @brief Logs a tracking-state reset (see reset_tracking_state) with its cause.
    * @param reason Human-readable cause of the reset (e.g. the reposition jump or lane departure).
    */
@@ -81,6 +89,7 @@ public:
 private:
   rclcpp::Logger logger_;
   rclcpp::Clock::SharedPtr clock_;
+  bool debug_log_enabled_{false};  // enable_debug_log: gates the per-cycle diagnostics
 
   rclcpp::Publisher<autoware_internal_debug_msgs::msg::Float64Stamped>::SharedPtr
     pub_processing_time_;

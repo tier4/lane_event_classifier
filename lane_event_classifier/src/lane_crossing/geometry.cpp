@@ -222,9 +222,10 @@ std::optional<CrossingCandidate> get_trajectory_crossing(
   const std::vector<geometry_msgs::msg::Pose> & candidate_object_poses,
   double distance_to_left_boundary_m, double distance_to_right_boundary_m,
   double lateral_trigger_distance_m, bool trajectory_starts_inside_sequence,
-  std::size_t & debug_departure_count)
+  std::size_t & debug_departure_count, std::string & debug_note)
 {
   if (trajectory_points.size() < 2) {
+    debug_note = "no trajectory";
     return std::nullopt;
   }
   const auto crossings = get_ordered_boundary_crossings(trajectory_points, bounds);
@@ -238,6 +239,23 @@ std::optional<CrossingCandidate> get_trajectory_crossing(
     candidate_arcs.push_back(
       project_arc_length(trajectory_points, pose.position.x, pose.position.y));
   }
+  // The predictive source only fires once the planned dodge brackets the object, so the arcs are
+  // what explain a late onset: a re-entry short of the object cannot bracket it.
+  debug_note = fmt::format(
+    "traj_arc={:.1f}m departures=[{}] candidate_arcs=[{}]", polyline_arc_length(trajectory_points),
+    fmt::join(
+      [&departures] {
+        std::vector<std::string> spans;
+        spans.reserve(departures.size());
+        for (const auto & departure : departures) {
+          spans.push_back(
+            fmt::format("{:.1f}->{:.1f}m", departure.exit_arc_m, departure.reenter_arc_m));
+        }
+        return spans;
+      }(),
+      " "),
+    fmt::join(candidate_arcs, ","));
+
   for (const auto & departure : departures) {
     const bool brackets_candidate =
       std::any_of(candidate_arcs.cbegin(), candidate_arcs.cend(), [&departure](const double arc) {
@@ -265,9 +283,26 @@ struct NeighbourOvershoot
   std::optional<lanelet::BasicPoint2d> deepest_corner;
 };
 
+// Distance from the corner to the nearest lane of the route sequence, or nullopt when none of them
+// can be measured. Negative or zero means the corner is still inside a sequence lane.
+std::optional<double> distance_to_lane_sequence(
+  const LaneTracker & tracker, const std::unordered_set<lanelet::Id> & sequence_ids,
+  const lanelet::BasicPoint2d & corner)
+{
+  std::optional<double> nearest;
+  for (const auto sequence_id : sequence_ids) {
+    const auto distance = tracker.distance_to_lane(sequence_id, corner);
+    if (!distance) {
+      continue;
+    }
+    nearest = nearest ? std::min(*nearest, *distance) : *distance;
+  }
+  return nearest;
+}
+
 NeighbourOvershoot deepest_footprint_overshoot(
-  const LaneTracker & tracker, lanelet::Id reference_lane_id, lanelet::Id neighbour_id,
-  const std::vector<lanelet::BasicPoint2d> & footprint)
+  const LaneTracker & tracker, const std::unordered_set<lanelet::Id> & sequence_ids,
+  lanelet::Id neighbour_id, const std::vector<lanelet::BasicPoint2d> & footprint)
 {
   NeighbourOvershoot deepest;
   for (const auto & corner : footprint) {
@@ -275,7 +310,10 @@ NeighbourOvershoot deepest_footprint_overshoot(
     if (!inside_neighbour || *inside_neighbour > 0.0) {
       continue;  // this corner is not inside the neighbour lane
     }
-    const auto overshoot = tracker.distance_to_lane(reference_lane_id, corner);
+    // Measured against the whole route sequence, not the reference lane alone: at a lane-to-lane
+    // transition a corner that has merely advanced into the next route lane sits metres from the
+    // reference lane, which would read as a deep lateral poke when it is longitudinal progress.
+    const auto overshoot = distance_to_lane_sequence(tracker, sequence_ids, corner);
     if (overshoot && *overshoot > deepest.overshoot_m) {
       deepest.overshoot_m = *overshoot;
       deepest.deepest_corner = corner;
@@ -291,21 +329,21 @@ struct FootprintCrossing
   std::string debug_note;
 };
 
-// Whether a candidate object lies within proximity_m of the point.
-bool candidate_object_near_point(
+// Distance from the point to the nearest candidate object (infinity when there are none).
+double nearest_candidate_object_distance_m(
   const std::vector<geometry_msgs::msg::Pose> & candidate_object_poses,
-  const lanelet::BasicPoint2d & point, double proximity_m)
+  const lanelet::BasicPoint2d & point)
 {
-  return std::any_of(
-    candidate_object_poses.cbegin(), candidate_object_poses.cend(),
-    [&](const geometry_msgs::msg::Pose & pose) {
-      return std::hypot(pose.position.x - point.x(), pose.position.y - point.y()) <= proximity_m;
-    });
+  double nearest_m = std::numeric_limits<double>::infinity();
+  for (const auto & pose : candidate_object_poses) {
+    nearest_m =
+      std::min(nearest_m, std::hypot(pose.position.x - point.x(), pose.position.y - point.y()));
+  }
+  return nearest_m;
 }
 
 FootprintCrossing get_footprint_crossing(
-  const LaneTracker & tracker, lanelet::Id reference_lane_id,
-  const std::unordered_set<lanelet::Id> & sequence_ids,
+  const LaneTracker & tracker, const std::unordered_set<lanelet::Id> & sequence_ids,
   const std::vector<lanelet::BasicPoint2d> & footprint,
   const std::vector<lanelet::Id> & footprint_ids, const LaneSequenceBounds & bounds,
   double footprint_boundary_overshoot_m,
@@ -320,20 +358,26 @@ FootprintCrossing get_footprint_crossing(
       continue;  // a lane of the sequence, not a crossing
     }
     const auto overshoot =
-      deepest_footprint_overshoot(tracker, reference_lane_id, neighbour_id, footprint);
+      deepest_footprint_overshoot(tracker, sequence_ids, neighbour_id, footprint);
     const auto neighbour_lane = tracker.get_lanelet(neighbour_id);
     const bool is_shoulder = neighbour_lane && lanelet2_utils::is_shoulder_lane(*neighbour_lane);
+    // The object proximity is the gate that most often blocks an otherwise valid crossing, so the
+    // measured distance goes into the note rather than a bare pass/fail.
+    const double object_distance_m =
+      overshoot.deepest_corner
+        ? nearest_candidate_object_distance_m(candidate_object_poses, *overshoot.deepest_corner)
+        : std::numeric_limits<double>::infinity();
     debug_notes.push_back(
       fmt::format(
-        "{}:{:.2f}m{}", neighbour_id, overshoot.overshoot_m,
+        "{}:overshoot{:.2f}m/nearest_object{:.1f}m<={:.1f}m{}", neighbour_id, overshoot.overshoot_m,
+        object_distance_m, footprint_crossing_object_proximity_m,
         is_shoulder ? " shoulder-exempt" : ""));
     if (is_shoulder) {
       continue;
     }
     if (
       overshoot.deepest_corner && overshoot.overshoot_m >= deepest_overshoot_m &&
-      candidate_object_near_point(
-        candidate_object_poses, *overshoot.deepest_corner, footprint_crossing_object_proximity_m)) {
+      object_distance_m <= footprint_crossing_object_proximity_m) {
       deepest_overshoot_m = overshoot.overshoot_m;
       best = CrossingCandidate{
         point_is_nearer_left_boundary(*overshoot.deepest_corner, bounds),
@@ -356,7 +400,8 @@ struct ResolvedCrossing
 ResolvedCrossing resolve_crossing(
   const LaneTracker & tracker, const lanelet::ConstLanelet & reference_lane,
   const std::unordered_set<lanelet::Id> & sequence_ids, const CrossingCandidate & candidate,
-  const std::string & debug_source, const std::string & debug_detail)
+  bool is_from_trajectory_source, const std::string & debug_source,
+  const std::string & debug_detail)
 {
   const bool is_to_left = candidate.is_to_left;
   const lanelet::BasicPoint2d crossing_point = candidate.point;
@@ -393,6 +438,7 @@ ResolvedCrossing resolve_crossing(
   crossing.target_lane_id = target_lane_id;
   crossing.crossing_point = crossing_point;
   crossing.is_to_left = is_to_left;
+  crossing.is_from_trajectory_source = is_from_trajectory_source;
   return {
     crossing, fmt::format(
                 "crossing to {} (target={} via {}; {})", is_to_left ? "left" : "right",
@@ -505,36 +551,38 @@ LaneCrossingGeometry::SourceScan LaneCrossingGeometry::scan_sources(
 
   // Source (a) - predictive trajectory bracket (early, centerline based, ego-near-boundary gated).
   std::size_t debug_departure_count = 0;
+  std::string debug_trajectory_note{"none"};
   auto trajectory_crossing =
-    has_trajectory ? get_trajectory_crossing(
-                       request.trajectory_points, sequence.bounds, request.candidate_object_poses,
-                       sequence.distance_to_left_boundary_m, sequence.distance_to_right_boundary_m,
-                       thresholds_.predictive_lateral_trigger_distance_m,
-                       trajectory_starts_inside_sequence, debug_departure_count)
-                   : std::nullopt;
+    has_trajectory
+      ? get_trajectory_crossing(
+          request.trajectory_points, sequence.bounds, request.candidate_object_poses,
+          sequence.distance_to_left_boundary_m, sequence.distance_to_right_boundary_m,
+          thresholds_.predictive_lateral_trigger_distance_m, trajectory_starts_inside_sequence,
+          debug_departure_count, debug_trajectory_note)
+      : std::nullopt;
 
   // Source (b) - physical footprint crossing (robust, the real body over the line).
   auto footprint_crossing =
     has_footprint
       ? get_footprint_crossing(
-          tracker, request.reference_lane.id(),
-          context.sequence_ids(thresholds_.crossing_look_ahead_m), request.footprint,
+          tracker, context.sequence_ids(thresholds_.crossing_look_ahead_m), request.footprint,
           context.footprint_lane_ids(), sequence.bounds, thresholds_.footprint_boundary_overshoot_m,
           request.candidate_object_poses, thresholds_.footprint_crossing_object_proximity_m)
       : FootprintCrossing{std::nullopt, "none"};
 
   std::string debug_detail = fmt::format(
     "departures={} candidates={} lateral_to_boundary=(L{:.2f} R{:.2f})<=trigger{:.2f} "
-    "footprint_neighbours=[{}]",
+    "trajectory=[{}] footprint_neighbours=[{}]",
     debug_departure_count, request.candidate_object_poses.size(),
     sequence.distance_to_left_boundary_m, sequence.distance_to_right_boundary_m,
-    thresholds_.predictive_lateral_trigger_distance_m, footprint_crossing.debug_note);
+    thresholds_.predictive_lateral_trigger_distance_m, debug_trajectory_note,
+    footprint_crossing.debug_note);
 
   // Predictive fires earlier, so prefer it; the physical source still catches a shallow dodge.
   if (trajectory_crossing) {
-    return {std::move(trajectory_crossing), "trajectory", std::move(debug_detail)};
+    return {std::move(trajectory_crossing), true, "trajectory", std::move(debug_detail)};
   }
-  return {std::move(footprint_crossing.crossing), "footprint", std::move(debug_detail)};
+  return {std::move(footprint_crossing.crossing), false, "footprint", std::move(debug_detail)};
 }
 
 LaneCrossingGeometry::CrossingResult LaneCrossingGeometry::compute_crossing(
@@ -558,7 +606,7 @@ LaneCrossingGeometry::CrossingResult LaneCrossingGeometry::compute_crossing(
 
   auto resolved = resolve_crossing(
     tracker, request.reference_lane, context.sequence_ids(thresholds_.crossing_look_ahead_m),
-    *scan.candidate, scan.source, scan.debug_detail);
+    *scan.candidate, scan.is_from_trajectory_source, scan.source, scan.debug_detail);
   return {std::move(resolved.crossing), std::move(resolved.debug_diagnostic)};
 }
 

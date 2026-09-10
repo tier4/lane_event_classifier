@@ -241,7 +241,9 @@ public:
         config.crossing_look_ahead_m, config.footprint_boundary_overshoot_m,
         config.predictive_lateral_trigger_distance_m,
         config.footprint_crossing_object_proximity_m}},
-      LaneCrossingObjects{config.object_longitudinal_window_m}}
+      LaneCrossingObjects{
+        config.object_longitudinal_window_m, config.object_lateral_buffer_m,
+        config.ignored_object_labels}}
   {
     const auto result = tracker_.set_lanelet_map(map);
     EXPECT_TRUE(result.has_value());
@@ -504,6 +506,49 @@ TEST(LaneCrossingTest, moving_object_can_qualify)
   int64_t time_ms = 0;
   EXPECT_TRUE(run_until_crossing(sim, route, crossing_trajectory, ego_in_47, objects, 10, time_ms))
     << "a moving object the ego dodges around still qualifies";
+}
+
+// Lateral buffer: an obstacle parked just outside the lane boundary is still what the ego dodges.
+TEST(LaneCrossingTest, object_just_outside_the_boundary_qualifies_via_lateral_buffer)
+{
+  auto map = load_test_map();
+  ASSERT_TRUE(static_cast<bool>(map));
+
+  Simulator sim{map, make_config()};
+  const std::vector<lanelet::Id> route{route_ids().begin(), route_ids().end()};
+
+  const auto crossing_trajectory = build_out_and_back_trajectory(map, 47, 48, 0.3, 0.9, 25);
+  const auto ego_in_47 = point_near_right_boundary(map, 47, 0.3, 0.4);
+  // A negative inset places the object outside lane 47; a 0.5 m box at 1.0 m out leaves its nearest
+  // edge 0.75 m clear of the boundary, so only object_lateral_buffer_m can bring it in.
+  const auto object_point = point_near_left_boundary(map, 47, 0.5, -1.0);
+  const auto objects =
+    test_maps::make_objects({test_maps::make_object(object_point.x(), object_point.y(), 0.5, 0.5)});
+
+  int64_t time_ms = 0;
+  EXPECT_TRUE(run_until_crossing(sim, route, crossing_trajectory, ego_in_47, objects, 10, time_ms))
+    << "an object within object_lateral_buffer_m of the lane sequence qualifies";
+}
+
+// Class filter: the same scene with unclassified perception clutter must not onset.
+TEST(LaneCrossingTest, unknown_object_is_ignored)
+{
+  auto map = load_test_map();
+  ASSERT_TRUE(static_cast<bool>(map));
+
+  Simulator sim{map, make_config()};
+  const std::vector<lanelet::Id> route{route_ids().begin(), route_ids().end()};
+
+  const auto crossing_trajectory = build_out_and_back_trajectory(map, 47, 48, 0.3, 0.9, 25);
+  const auto ego_in_47 = point_near_right_boundary(map, 47, 0.3, 0.4);
+  const auto object_point = point_at_fraction(centerline_points(map, 47), 0.5);
+  const auto objects = test_maps::make_objects({test_maps::make_object(
+    object_point.x(), object_point.y(), 2.0, 2.0, 0.0,
+    autoware_perception_msgs::msg::ObjectClassification::UNKNOWN)});
+
+  int64_t time_ms = 0;
+  EXPECT_FALSE(run_until_crossing(sim, route, crossing_trajectory, ego_in_47, objects, 10, time_ms))
+    << "an UNKNOWN object is listed in ignored_object_labels and cannot be a candidate";
 }
 
 // Two staggered objects: the closed departure need only bracket one candidate to onset.

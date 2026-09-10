@@ -32,19 +32,27 @@ public:
    * @param now_s Current time in seconds.
    * @param persist_duration_s Window the value must persist before confirming.
    * @param matches Whether `current` continues the tracked value, rather than restarting it.
+   * @param dropout_grace_s How long the sample may go absent without ending the signal. Zero (the
+   *   default) means any missing cycle restarts the window from scratch.
    */
   bool update(
     std::optional<T> current, double now_s, double persist_duration_s,
-    const std::function<bool(const T &, const T &)> & matches)
+    const std::function<bool(const T &, const T &)> & matches, double dropout_grace_s = 0.0)
   {
     if (!current) {
-      tracked_.reset();
-      return false;
+      // A geometric signal sampled per cycle can miss a cycle while its detection sources hand
+      // over; only a dropout longer than the grace window means the condition really ended.
+      if (!tracked_ || (now_s - last_present_s_) > dropout_grace_s) {
+        reset();
+        return false;
+      }
+      return (now_s - start_s_) >= persist_duration_s;
     }
     if (!tracked_ || !matches(*tracked_, *current)) {
       tracked_ = *current;
       start_s_ = now_s;
     }
+    last_present_s_ = now_s;
     return (now_s - start_s_) >= persist_duration_s;
   }
 
@@ -54,11 +62,13 @@ public:
   {
     tracked_.reset();
     start_s_ = 0.0;
+    last_present_s_ = 0.0;
   }
 
 private:
   std::optional<T> tracked_;
   double start_s_{0.0};
+  double last_present_s_{0.0};
 };
 
 /**

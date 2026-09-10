@@ -20,6 +20,7 @@
 #include <lane_event_classifier/detail/geometry_utils.hpp>
 #include <lane_event_classifier/types.hpp>
 
+#include <autoware_perception_msgs/msg/object_classification.hpp>
 #include <autoware_perception_msgs/msg/predicted_objects.hpp>
 #include <autoware_planning_msgs/msg/lanelet_route.hpp>
 #include <autoware_planning_msgs/msg/trajectory.hpp>
@@ -191,9 +192,16 @@ inline LaneEventInput make_input(
 
 // An axis-aligned bounding-box object at (x, y), static unless a speed is given.
 inline autoware_perception_msgs::msg::PredictedObject make_object(
-  double x, double y, double size_x = 2.0, double size_y = 2.0, double speed_mps = 0.0)
+  double x, double y, double size_x = 2.0, double size_y = 2.0, double speed_mps = 0.0,
+  uint8_t label = autoware_perception_msgs::msg::ObjectClassification::CAR)
 {
   autoware_perception_msgs::msg::PredictedObject object;
+  // Classified by default: ignored_object_labels filters UNKNOWN, so an unclassified object would
+  // never qualify as a candidate.
+  autoware_perception_msgs::msg::ObjectClassification classification;
+  classification.label = label;
+  classification.probability = 1.0;
+  object.classification.push_back(classification);
   auto & pose = object.kinematics.initial_pose_with_covariance.pose;
   pose.position.x = x;
   pose.position.y = y;

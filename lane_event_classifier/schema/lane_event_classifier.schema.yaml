@@ -1,4 +1,8 @@
 lane_event_classifier:
+  enable_debug_log:
+    type: bool
+    default_value: false
+    description: Emit the per-cycle diagnostics (the classifier reason strings, the accumulating-departure trace, and the stuck-reference-lane warning). Off by default because they print every second per classifier and drown a shared terminal. State transitions, reference-lane re-anchoring, and missing-input warnings are always logged.
   reposition_jump_margin_m:
     type: double
     default_value: 0.5
@@ -140,6 +144,19 @@ lane_event_classifier:
       description: Ahead-of-ego arc-length window along the reference straight sequence in which a candidate object must lie
       validation:
         gt<>: [0.0]
+    object_lateral_buffer_m:
+      type: double
+      default_value: 1.5
+      description: Lateral slack outside the lane-sequence polygons within which an object still counts as on the sequence. An obstacle parked just past the boundary is what the ego dodges just as much as one strictly inside the lane, and perception footprints sit off by a similar margin, so a strict polygon overlap test misses the candidate the crossing is for.
+      validation:
+        gt_eq<>: [0.0]
+    ignored_object_labels:
+      type: string_array
+      default_value: ["UNKNOWN"]
+      description: Perceived-object classifications that never qualify as a candidate object, matched on the highest-probability label. UNKNOWN covers unclassified perception clutter, which is too noisy to justify a crossing.
+      validation:
+        subset_of<>:
+          [["UNKNOWN", "CAR", "TRUCK", "BUS", "TRAILER", "MOTORCYCLE", "BICYCLE", "PEDESTRIAN"]]
     object_qualifying_memory_s:
       type: double
       default_value: 3.0

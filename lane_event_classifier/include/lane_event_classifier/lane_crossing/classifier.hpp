@@ -67,7 +67,7 @@ private:
 
   /** @brief Accumulates a valid crossing over the persistence window; true on confirm. */
   [[nodiscard]] bool accumulate_crossing(
-    const LaneCrossingCrossing & crossing, double now_s, bool has_confidence_signal);
+    const std::optional<LaneCrossingCrossing> & crossing, double now_s, bool has_confidence_signal);
 
   /** @brief Clears the persistence timers on a phase transition. */
   void reset_timers();

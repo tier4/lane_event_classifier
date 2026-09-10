@@ -44,20 +44,32 @@ void IntentionalCrossingClassifier::reset_timers()
 }
 
 bool IntentionalCrossingClassifier::accumulate_crossing(
-  const LaneCrossingCrossing & crossing, double now_s, bool has_confidence_signal)
+  const std::optional<LaneCrossingCrossing> & crossing, double now_s, bool has_confidence_signal)
 {
   // Persistence (docs/lane_crossing.md, "Persistence"): same side + stable crossing point.
   const auto matches_tracked =
     [this](const LaneCrossingCrossing & tracked, const LaneCrossingCrossing & current) {
-      return tracked.is_to_left == current.is_to_left &&
-             (current.crossing_point - tracked.crossing_point).norm() <=
-               config_.crossing_position_tolerance_m;
+      if (tracked.is_to_left != current.is_to_left) {
+        return false;
+      }
+      // The two onset sources measure different points - the trajectory exit versus the deepest
+      // footprint corner - metres apart on the same crossing. A source flip continues the crossing
+      // rather than starting a new one, so the position tolerance only applies within one source.
+      if (tracked.is_from_trajectory_source != current.is_from_trajectory_source) {
+        return true;
+      }
+      return (current.crossing_point - tracked.crossing_point).norm() <=
+             config_.crossing_position_tolerance_m;
     };
 
   // Confidence signal (docs/lane_crossing.md, "Confidence signal"): shortens the window.
   const double effective_persist_duration =
     config_.crossing_persist_duration_s * (has_confidence_signal ? config_.confidence_factor : 1.0);
-  return crossing_signal_.update(crossing, now_s, effective_persist_duration, matches_tracked);
+  // The two onset sources cover different parts of one manoeuvre and each drops a cycle at the
+  // hand-over, so a gap shorter than the persistence window itself does not break persistence.
+  return crossing_signal_.update(
+    crossing, now_s, effective_persist_duration, matches_tracked,
+    config_.crossing_persist_duration_s);
 }
 
 bool IntentionalCrossingClassifier::has_confidence_signal(
@@ -104,26 +116,41 @@ void IntentionalCrossingClassifier::update(
       detect_completion(observation, now_s);
       break;
   }
+
+  // The candidate-object scan is what gates both onset sources, so carry its breakdown into the
+  // per-cycle reason while idle (in the crossing phase the reason only marks transitions).
+  if (phase_ == Phase::idle) {
+    debug_reason_ = fmt::format("{} | objects: {}", debug_reason_, objects.debug_diagnostic);
+  }
 }
 
 void IntentionalCrossingClassifier::detect_onset(
   const LaneEventInput & input, const LaneCrossingObservation & observation, double now_s)
 {
   // Onset (docs/lane_crossing.md, "Onset"): the candidate requirement is folded into the crossing.
+  // A missing crossing is fed through the signal rather than resetting it, so the grace window can
+  // bridge the gap between the predictive and the physical source.
+  const bool confidence =
+    observation.crossing && has_confidence_signal(input, *observation.crossing);
+  if (accumulate_crossing(observation.crossing, now_s, confidence)) {
+    debug_reason_ = fmt::format(
+      "onset ({}): {}", observation.crossing ? "this cycle" : "bridged dropout",
+      observation.debug_crossing_diagnostic);
+    phase_ = Phase::crossing;
+    reset_timers();
+    return;
+  }
+  // Every idle path assigns the reason, so update() can extend it without accumulating stale text.
   if (!observation.crossing) {
-    crossing_signal_.reset();
     // Per-cycle diagnostic (surfaced throttled by the node): why onset did not fire this cycle.
     debug_reason_ = fmt::format(
       "idle: on_route_straight={} | crossing: {}", observation.is_on_route_straight ? "yes" : "no",
       observation.debug_crossing_diagnostic);
     return;
   }
-  const bool confidence = has_confidence_signal(input, *observation.crossing);
-  if (accumulate_crossing(*observation.crossing, now_s, confidence)) {
-    debug_reason_ = fmt::format("onset: {}", observation.debug_crossing_diagnostic);
-    phase_ = Phase::crossing;
-    reset_timers();
-  }
+  debug_reason_ = fmt::format(
+    "accumulating (confidence={}): {}", confidence ? "yes" : "no",
+    observation.debug_crossing_diagnostic);
 }
 
 void IntentionalCrossingClassifier::detect_completion(

@@ -76,6 +76,7 @@ struct LaneCrossingCrossing
   lanelet::BasicPoint2d crossing_point{
     0.0, 0.0};             // where the trajectory first crosses the reference boundary
   bool is_to_left{false};  // crossing is toward the reference lane's left side
+  bool is_from_trajectory_source{false};  // predictive source (a), not the footprint source (b)
 };
 
 /** @brief The boundary / footprint half of the per-cycle lane-crossing observation. */
@@ -146,6 +147,7 @@ private:
   struct SourceScan
   {
     std::optional<CrossingCandidate> candidate;
+    bool is_from_trajectory_source{false};
     std::string source;
     std::string debug_detail;
   };

@@ -88,7 +88,9 @@ void LaneEventClassifierDebug::log_state(
         .c_str());
     previous_reference_lane_id_ = reference_lane.reference_lane_id;
   }
-  if (!lane_tracker.is_reference_lane_held() && lane_tracker.debug_is_last_reanchor_blocked()) {
+  if (
+    debug_log_enabled_ && !lane_tracker.is_reference_lane_held() &&
+    lane_tracker.debug_is_last_reanchor_blocked()) {
     log_warn(
       fmt::format(
         "[lane_event] reference lane STUCK at {} but ego is now in lane {} (not a next lane of the "
@@ -130,7 +132,7 @@ void LaneEventClassifierDebug::log_state(
         reasons.empty() ? "(none)" : reasons, build_lanes_context())
         .c_str());
     previously_published_state_ = current_state;
-  } else if (current_state == DrivingState::LANE_FOLLOWING && ego_departed) {
+  } else if (debug_log_enabled_ && current_state == DrivingState::LANE_FOLLOWING && ego_departed) {
     RCLCPP_INFO_THROTTLE(
       logger_, *clock_, 1000, "%s",
       fmt::format(
@@ -141,6 +143,9 @@ void LaneEventClassifierDebug::log_state(
   }
 
   // Per-cycle classifier reasoning (throttled): why an event did or did not fire.
+  if (!debug_log_enabled_) {
+    return;
+  }
   std::string classifier_reasons;
   for (const auto & classifier : classifiers) {
     const auto reason = classifier->debug_reason();

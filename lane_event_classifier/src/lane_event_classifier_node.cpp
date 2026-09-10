@@ -57,6 +57,8 @@ LaneEventClassifierNode::LaneEventClassifierNode(const rclcpp::NodeOptions & nod
 void LaneEventClassifierNode::build_classifiers()
 {
   // Every subsystem is assembled the same way: config, then its policy layers by value.
+  debug_.set_debug_log_enabled(params_.enable_debug_log);
+
   lane_following_checker_ =
     LaneFollowingChecker(params_.lane_following, LaneFollowingGeometry{params_.lane_following});
 
@@ -74,7 +76,10 @@ void LaneEventClassifierNode::build_classifiers()
         params_.lane_crossing.footprint_boundary_overshoot_m,
         params_.lane_crossing.predictive_lateral_trigger_distance_m,
         params_.lane_crossing.footprint_crossing_object_proximity_m}},
-      LaneCrossingObjects{params_.lane_crossing.object_longitudinal_window_m}));
+      LaneCrossingObjects{
+        params_.lane_crossing.object_longitudinal_window_m,
+        params_.lane_crossing.object_lateral_buffer_m,
+        params_.lane_crossing.ignored_object_labels}));
 }
 
 void LaneEventClassifierNode::map_callback(
