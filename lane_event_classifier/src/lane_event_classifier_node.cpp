@@ -56,22 +56,30 @@ LaneEventClassifierNode::LaneEventClassifierNode(const rclcpp::NodeOptions & nod
 
 void LaneEventClassifierNode::build_classifiers()
 {
-  lane_following_checker_ = LaneFollowingChecker(params_.lane_following);
+  // Every subsystem is assembled the same way: config, then its policy layers by value.
+  debug_.set_debug_log_enabled(params_.enable_debug_log);
 
-  // Classifiers are constructed here (no plugin/pluginlib): the node owns a vector of concrete
-  // LaneEventClassifierBase implementations and iterates it in on_trajectory(). Each classifier
-  // derives its own per-cycle geometry from the shared LaneTracker's generic queries. Vector order
-  // is the arbitration priority: lane change first, then intentional crossing.
+  lane_following_checker_ =
+    LaneFollowingChecker(params_.lane_following, LaneFollowingGeometry{params_.lane_following});
+
+  // Vector order is the arbitration priority: lane change first, then intentional crossing.
   classifiers_.clear();
-  classifiers_.emplace_back(std::make_unique<LaneChangeClassifier>(
-    params_.lane_change.enable_classifier, params_.lane_change, lane_tracker_));
-  classifiers_.emplace_back(std::make_unique<IntentionalCrossingClassifier>(
-    params_.lane_crossing.enable_classifier, params_.lane_crossing, lane_tracker_,
-    LaneCrossingGeometry{
-      params_.lane_crossing.crossing_look_ahead_m,
-      params_.lane_crossing.footprint_boundary_overshoot_m,
-      params_.lane_crossing.predictive_lateral_trigger_distance_m},
-    LaneCrossingObjects{params_.lane_crossing.object_longitudinal_window_m}));
+  classifiers_.emplace_back(
+    std::make_unique<LaneChangeClassifier>(
+      params_.lane_change.enable_classifier, params_.lane_change, lane_tracker_,
+      LaneChangeGeometry{params_.lane_change.crossing_look_ahead_m}));
+  classifiers_.emplace_back(
+    std::make_unique<IntentionalCrossingClassifier>(
+      params_.lane_crossing.enable_classifier, params_.lane_crossing, lane_tracker_,
+      LaneCrossingGeometry{CrossingThresholds{
+        params_.lane_crossing.crossing_look_ahead_m,
+        params_.lane_crossing.footprint_boundary_overshoot_m,
+        params_.lane_crossing.predictive_lateral_trigger_distance_m,
+        params_.lane_crossing.footprint_crossing_object_proximity_m}},
+      LaneCrossingObjects{
+        params_.lane_crossing.object_longitudinal_window_m,
+        params_.lane_crossing.object_lateral_buffer_m,
+        params_.lane_crossing.ignored_object_labels}));
 }
 
 void LaneEventClassifierNode::map_callback(
@@ -125,8 +133,7 @@ tl::expected<void, std::string> LaneEventClassifierNode::take_data(
       std::make_unique<autoware::vehicle_info_utils::VehicleInfo>(vehicle_info_);
   }
 
-  // Turn indicator is optional: keep the previous / default value when it is unavailable rather
-  // than failing the cycle (the blinker confidence signal just stays inactive).
+  // Turn indicator is optional: keep the previous value rather than failing the cycle.
   if (const auto turn_indicators_msg = sub_turn_indicators_.take_data()) {
     input_.turn_indicator = turn_indicators_msg->report;
   }
@@ -140,41 +147,41 @@ tl::expected<void, std::string> LaneEventClassifierNode::check_tracking_state()
 {
   const auto & odometry = *input_.odometry_ptr;
   const auto & ego_position = odometry.pose.pose.position;
+  const auto & velocity = odometry.twist.twist.linear;
   const lanelet::BasicPoint2d ego_point{ego_position.x, ego_position.y};
-  const rclcpp::Time ego_stamp{odometry.header.stamp};
+  const EgoMotionSample ego_motion{
+    ego_point, std::hypot(velocity.x, velocity.y), rclcpp::Time{odometry.header.stamp}.seconds()};
 
-  // Trigger 1 — a reposition jump (localization discontinuity). A fixed distance threshold cannot
-  // tell a jump from normal driving: a small backward nudge at a standstill is a reposition, while
-  // a large forward step at speed is not. So compare the measured step against the motion the
-  // reported speed can explain over the elapsed cycle (speed * dt); anything beyond that plus a
-  // localization-noise margin is treated as a reposition jump, independent of the vehicle's speed.
-  bool ego_jumped = false;
-  if (previous_ego_position_ && previous_ego_stamp_) {
-    const double elapsed_s = (ego_stamp - *previous_ego_stamp_).seconds();
-    if (elapsed_s > 0.0) {
-      const double measured_step_m = (ego_point - *previous_ego_position_).norm();
-      const auto & velocity = odometry.twist.twist.linear;
-      const double ego_speed_mps = std::hypot(velocity.x, velocity.y);
-      const double explainable_step_m =
-        ego_speed_mps * elapsed_s + params_.reposition_jump_margin_m;
-      ego_jumped = measured_step_m > explainable_step_m;
-    }
-  }
-  previous_ego_position_ = ego_point;
-  previous_ego_stamp_ = ego_stamp;
+  // Trigger 1 — a reposition jump (localization discontinuity).
+  const bool ego_jumped =
+    previous_ego_motion_ &&
+    is_reposition_jump(*previous_ego_motion_, ego_motion, params_.reposition_jump_margin_m);
+  previous_ego_motion_ = ego_motion;
   if (ego_jumped) {
     return tl::make_unexpected("reposition jump (step exceeds reported motion)");
   }
 
-  // Trigger 2 — while the reference lane is held (an event is active) the tracker never
-  // re-anchors, so a manual takeover that drives far from the held lane would keep the reference
-  // lane held forever. Reset once the ego strays past the departure threshold.
+  // Trigger 2 — a held reference lane never re-anchors, so reset once the ego strays past it.
   if (lane_tracker_.is_reference_lane_held()) {
     const auto distance_to_reference =
       lane_tracker_.distance_to_lane(lane_tracker_.reference_lane().reference_lane_id, ego_point);
     if (distance_to_reference && *distance_to_reference > params_.lane_departure_reset_distance_m) {
       return tl::make_unexpected("ego departed far from the held reference lane");
     }
+    stuck_reanchor_signal_.reset();
+    return {};
+  }
+
+  // Trigger 3 — an unheld reference lane with a blocked reanchor resets after the debounce.
+  const auto distance_to_reference =
+    lane_tracker_.distance_to_lane(lane_tracker_.reference_lane().reference_lane_id, ego_point);
+  const bool is_stuck_and_far = is_stuck_and_far_from_reference(
+    lane_tracker_.debug_is_last_reanchor_blocked(), distance_to_reference,
+    params_.lane_departure_reset_distance_m);
+  if (persists(
+        stuck_reanchor_signal_, is_stuck_and_far, ego_motion.stamp_s,
+        params_.stuck_reanchor_reset_duration_s)) {
+    return tl::make_unexpected("reference lane stuck: unreachable forward and far from ego");
   }
 
   return {};
@@ -204,7 +211,7 @@ void LaneEventClassifierNode::on_trajectory(
   const auto lane_event_inputs_updated = take_data(trajectory_msg);
   if (!lane_event_inputs_updated) {
     debug_.log_warn(lane_event_inputs_updated.error());
-    out.driving_state.state = DrivingState::UNKNOWN;
+    out.driving_state.state = DrivingState::UNDEFINED;
     pub_driving_factor_->publish(out);
     return;
   }
@@ -214,14 +221,16 @@ void LaneEventClassifierNode::on_trajectory(
   }
 
   stop_watch.tic("lane_tracker");
-  lane_tracker_.update(input_);
+  if (const auto tracker_updated = lane_tracker_.update(input_); !tracker_updated) {
+    debug_.log_warn(tracker_updated.error());
+  }
+  context_.update(lane_tracker_, input_);
   const double lane_tracker_time_ms = stop_watch.toc("lane_tracker");
 
   const auto & ego_position = input_.odometry_ptr->pose.pose.position;
   stop_watch.tic("lane_following");
-  const auto lane_following_result = lane_following_checker_.evaluate(
-    lane_tracker_.lanelet_map_ptr(), lane_tracker_.routing_graph_ptr(),
-    lane_tracker_.reference_lane().reference_lane_id, {ego_position.x, ego_position.y});
+  const auto lane_following_result =
+    lane_following_checker_.evaluate(lane_tracker_, context_, {ego_position.x, ego_position.y});
   const double lane_following_time_ms = stop_watch.toc("lane_following");
 
   uint8_t current_state_val = DrivingState::LANE_FOLLOWING;
@@ -233,22 +242,19 @@ void LaneEventClassifierNode::on_trajectory(
       continue;
     }
     stop_watch.tic(classifier->name());
-    classifier->update(input_);
+    classifier->update(input_, context_);
     classifier_processing_times_ms.emplace_back(
       classifier->name(), stop_watch.toc(classifier->name()));
-    const uint8_t candidate_state = classifier->get_state();
-    // Only a confirmed event counts; LANE_FOLLOWING or UNKNOWN from a classifier is no event.
-    if (
-      candidate_state == DrivingState::LANE_FOLLOWING || candidate_state == DrivingState::UNKNOWN) {
-      continue;
+    const auto candidate_state = classifier->get_state();
+    if (!candidate_state) {
+      continue;  // the classifier claims no event this cycle
     }
     if (!is_any_event_active) {
-      current_state_val = candidate_state;  // first confirmed classifier wins (priority order)
+      current_state_val = *candidate_state;  // first claiming classifier wins (priority order)
     }
     is_any_event_active = true;
   }
-  // No confirmed event: fall back to the lane-following check. A departure with no classified event
-  // is UNKNOWN.
+  // No confirmed event: fall back to the lane-following check; a departure is then UNKNOWN.
   if (!is_any_event_active && !lane_following_result.is_following) {
     current_state_val = DrivingState::UNKNOWN;
   }
@@ -258,18 +264,8 @@ void LaneEventClassifierNode::on_trajectory(
   out.driving_state.state = current_state_val;
   pub_driving_factor_->publish(out);
 
-  // Freeze the reference lane while an event is active, and release it once the event ends. A
-  // maneuver ends in a lane that is not a forward successor of the reference (e.g. a lane change
-  // into a parallel lane), and the tracker only re-anchors into a forward successor; without
-  // releasing, the reference would stay pinned to the origin lane forever and the classifier would
-  // re-detect the same crossing every cycle. Releasing re-anchors the tracker to the lane the ego
-  // settled into. Holding also activates the far-departure reset in check_tracking_state (a manual
-  // takeover that drives away from the held lane), which is gated on the reference lane being held.
-  if (is_any_event_active && !lane_tracker_.is_reference_lane_held()) {
-    lane_tracker_.hold_reference_lane();
-  } else if (!is_any_event_active && lane_tracker_.is_reference_lane_held()) {
-    lane_tracker_.release_reference_lane();
-  }
+  // Freeze the reference lane while an event runs (README.md, "Holding the reference lane").
+  lane_tracker_.apply_reference_lane_hold(is_any_event_active);
 
   const double total_time_ms = stop_watch.toc();
 

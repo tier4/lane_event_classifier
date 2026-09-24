@@ -37,8 +37,7 @@ across the package. The terms below are specific to intentional crossing.
 ## How the classifier decides
 
 The classifier is a state machine with two phases. Each phase maps to one reported result. Abort is
-not modelled in this pass (see the design notes), so there is no
-`ABORTING_INTENTIONAL_LANE_CROSSING` edge.
+not modelled in this pass (see the design notes), so a crossing has no abort edge.
 
 ```mermaid
 stateDiagram-v2
@@ -94,22 +93,30 @@ trajectory source is preferred (it is the earlier signal); the footprint source 
   its own, which can happen with no object or on a wide lane. This confirms while the body is still
   inside the lane.
 - **Footprint (physical).** A corner of the current footprint pokes past the reference boundary into
-  a lane outside the sequence by at least `footprint_boundary_overshoot_m`. This catches a dodge the
+  a lane outside the sequence by at least `footprint_boundary_overshoot_m`, and a candidate object
+  lies within `footprint_crossing_object_proximity_m` of that corner. This catches a dodge the
   centerline never crosses, a yawed body whose corner is over the line while `base_link` is not, and
-  keeps a small cornering overhang from counting. It is ground truth, not a prediction.
+  keeps a small cornering overhang from counting. The proximity check ties the crossing to the object
+  it dodges, rather than any candidate merely qualifying within the far longer
+  `object_longitudinal_window_m`. It is ground truth, not a prediction.
 
 The side of the crossing (left or right) comes from which reference boundary is nearer the crossing
 point.
 
 ### Exemptions
 
-A found crossing is dropped when either of these holds:
+A found crossing is dropped when any of these holds:
 
 - The reference lane is a turn or intersection lane. Leaving the lane there is turning, not dodging.
+- The reference lane is a road shoulder. Leaving it is a shoulder use (pull-over, stop), not an
+  intentional lane crossing.
+- The crossing target is a road shoulder. Crossing into it is the same shoulder use, from the other
+  direction.
 - The crossed boundary is a virtual linestring, not a real lane marking.
 
-These are the turn-lane and virtual-boundary exemptions the [lane-following check](lane_following.md)
-already applies, reused here for onset.
+The turn-lane and virtual-boundary exemptions are the same ones the
+[lane-following check](lane_following.md) already applies, reused here for onset. Crossing to or from
+a road shoulder is always lane following, never an intentional crossing.
 
 ### Persistence
 
@@ -153,17 +160,18 @@ would then read as a lane change.
 Schema: [`schema/lane_event_classifier.schema.yaml`](../schema/lane_event_classifier.schema.yaml).
 Defaults: [`param/lane_event_classifier.param.yaml`](../param/lane_event_classifier.param.yaml).
 
-| Name                             | Default | Meaning                                                                                                          |
-| -------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------- |
-| `enable_classifier`              | true    | Turn the intentional-crossing classifier on or off.                                                              |
-| `crossing_look_ahead_m`          | 30.0    | Arc length ahead along the trajectory scanned for a crossing.                                                    |
-| `crossing_persist_duration_s`    | 0.3     | Seconds a crossing must persist (same side, stable point) before onset.                                          |
-| `crossing_position_tolerance_m`  | 2.0     | How far the crossing point may move and still count as the same crossing.                                        |
-| `footprint_boundary_overshoot_m` | 0.3     | How far a footprint corner must poke past the boundary for the physical crossing source to count.                |
-| `settle_confirm_duration_s`      | 0.7     | Seconds the footprint must stay fully back inside the straight lane sequence to confirm a return.                |
-| `confidence_factor`              | 0.3     | Fraction the persistence window shrinks to when a confidence signal is present (0 < factor < 1).                 |
-| `object_longitudinal_window_m`   | 100.0   | Ahead-of-ego arc window along the straight lane sequence in which a candidate object must lie.                   |
-| `object_qualifying_memory_s`     | 3.0     | Seconds the most recent candidate objects stay remembered, bridging a perception dropout as the ego passes them. |
+| Name                                    | Default | Meaning                                                                                                          |
+| --------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------- |
+| `enable_classifier`                     | true    | Turn the intentional-crossing classifier on or off.                                                              |
+| `crossing_look_ahead_m`                 | 30.0    | Arc length ahead along the trajectory scanned for a crossing.                                                    |
+| `crossing_persist_duration_s`           | 0.3     | Seconds a crossing must persist (same side, stable point) before onset.                                          |
+| `crossing_position_tolerance_m`         | 2.0     | How far the crossing point may move and still count as the same crossing.                                        |
+| `footprint_boundary_overshoot_m`        | 0.3     | How far a footprint corner must poke past the boundary for the physical crossing source to count.                |
+| `footprint_crossing_object_proximity_m` | 10.0    | Max distance from the poking corner to a candidate object for the physical crossing source to count.             |
+| `settle_confirm_duration_s`             | 0.7     | Seconds the footprint must stay fully back inside the straight lane sequence to confirm a return.                |
+| `confidence_factor`                     | 0.3     | Fraction the persistence window shrinks to when a confidence signal is present (0 < factor < 1).                 |
+| `object_longitudinal_window_m`          | 100.0   | Ahead-of-ego arc window along the straight lane sequence in which a candidate object must lie.                   |
+| `object_qualifying_memory_s`            | 3.0     | Seconds the most recent candidate objects stay remembered, bridging a perception dropout as the ego passes them. |
 
 ## Design notes
 

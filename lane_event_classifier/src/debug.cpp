@@ -29,6 +29,8 @@ namespace
 const char * state_to_string(uint8_t state)
 {
   switch (state) {
+    case DrivingState::UNDEFINED:
+      return "UNDEFINED";
     case DrivingState::UNKNOWN:
       return "UNKNOWN";
     case DrivingState::LANE_FOLLOWING:
@@ -39,8 +41,6 @@ const char * state_to_string(uint8_t state)
       return "ABORTING_LANE_CHANGE";
     case DrivingState::INTENTIONAL_LANE_CROSSING:
       return "INTENTIONAL_LANE_CROSSING";
-    case DrivingState::ABORTING_INTENTIONAL_LANE_CROSSING:
-      return "ABORTING_INTENTIONAL_LANE_CROSSING";
     default:
       return "?";
   }
@@ -50,22 +50,11 @@ const char * state_to_string(uint8_t state)
 LaneEventClassifierDebug::LaneEventClassifierDebug(rclcpp::Node & node)
 : logger_{node.get_logger()}, clock_{node.get_clock()}
 {
-  pub_markers_ =
-    node.create_publisher<visualization_msgs::msg::MarkerArray>("~/debug/markers", rclcpp::QoS{1});
   pub_processing_time_ = node.create_publisher<autoware_internal_debug_msgs::msg::Float64Stamped>(
     "~/debug/processing_time_ms", rclcpp::QoS{1});
   pub_processing_time_text_ =
     node.create_publisher<autoware_internal_debug_msgs::msg::StringStamped>(
       "~/debug/processing_time_text", rclcpp::QoS{1});
-}
-
-void LaneEventClassifierDebug::publish_markers(
-  const visualization_msgs::msg::MarkerArray & markers) const
-{
-  if (markers.markers.empty()) {
-    return;
-  }
-  pub_markers_->publish(markers);
 }
 
 void LaneEventClassifierDebug::log_reset(const std::string & reason) const
@@ -81,30 +70,32 @@ void LaneEventClassifierDebug::log_warn(const std::string & message) const
 void LaneEventClassifierDebug::log_state(
   uint8_t current_state, const LaneEventInput & input,
   const LaneFollowingResult & lane_following_result, const LaneTracker & lane_tracker,
-  const std::vector<std::unique_ptr<LaneEventClassifierBase>> & classifiers)
+  const std::vector<std::unique_ptr<LaneEventClassifierBase>> & classifiers) const
 {
   const auto & ego_pos = input.odometry_ptr->pose.pose.position;
   const auto & reference_lane = lane_tracker.reference_lane();
   const auto & [is_lane_following, lane_following_reason] = lane_following_result;
   const bool ego_departed = !is_lane_following;
-  const auto following_reason = to_string(lane_following_reason);
+  const auto following_reason = to_debug_string(lane_following_reason);
 
-  // Trace reference lane (re)anchoring and the "stuck reference lane" condition (reference lane can
-  // no longer follow ego).
+  // Trace reference lane (re)anchoring and the "stuck reference lane" condition.
   if (reference_lane.reference_lane_id != previous_reference_lane_id_) {
     RCLCPP_INFO(
       logger_, "%s",
       fmt::format(
         "[lane_event] reference lane {} -> {} (ego now in lane {})", previous_reference_lane_id_,
-        reference_lane.reference_lane_id, lane_tracker.last_selected_lane_id())
+        reference_lane.reference_lane_id, lane_tracker.debug_last_selected_lane_id())
         .c_str());
     previous_reference_lane_id_ = reference_lane.reference_lane_id;
   }
-  if (!lane_tracker.is_reference_lane_held() && lane_tracker.is_last_reanchor_blocked()) {
-    log_warn(fmt::format(
-      "[lane_event] reference lane STUCK at {} but ego is now in lane {} (not a next lane of the "
-      "reference lane) -> footprint will read as a lateral departure",
-      reference_lane.reference_lane_id, lane_tracker.last_selected_lane_id()));
+  if (
+    debug_log_enabled_ && !lane_tracker.is_reference_lane_held() &&
+    lane_tracker.debug_is_last_reanchor_blocked()) {
+    log_warn(
+      fmt::format(
+        "[lane_event] reference lane STUCK at {} but ego is now in lane {} (not a next lane of the "
+        "reference lane) -> footprint will read as a lateral departure",
+        reference_lane.reference_lane_id, lane_tracker.debug_last_selected_lane_id()));
   }
 
   // Built lazily — it scans the map, so only when a log line is actually emitted.
@@ -136,12 +127,12 @@ void LaneEventClassifierDebug::log_state(
         "[lane_event] {} -> {} | ego=({:.2f}, {:.2f}) reference_lane={} on_route={} "
         "following={} ({}) | why: {} | {}",
         state_to_string(previously_published_state_), state_to_string(current_state), ego_pos.x,
-        ego_pos.y, reference_lane.reference_lane_id, reference_lane.is_reference_lane_on_route,
-        is_lane_following, following_reason, reasons.empty() ? "(none)" : reasons,
-        build_lanes_context())
+        ego_pos.y, reference_lane.reference_lane_id,
+        reference_lane.debug_is_reference_lane_on_route, is_lane_following, following_reason,
+        reasons.empty() ? "(none)" : reasons, build_lanes_context())
         .c_str());
     previously_published_state_ = current_state;
-  } else if (current_state == DrivingState::LANE_FOLLOWING && ego_departed) {
+  } else if (debug_log_enabled_ && current_state == DrivingState::LANE_FOLLOWING && ego_departed) {
     RCLCPP_INFO_THROTTLE(
       logger_, *clock_, 1000, "%s",
       fmt::format(
@@ -151,9 +142,10 @@ void LaneEventClassifierDebug::log_state(
         .c_str());
   }
 
-  // Per-cycle classifier reasoning (throttled): surfaces why an event did or did not fire even
-  // while the published state is steady (e.g. a crossing that never onsets because no object
-  // qualifies).
+  // Per-cycle classifier reasoning (throttled): why an event did or did not fire.
+  if (!debug_log_enabled_) {
+    return;
+  }
   std::string classifier_reasons;
   for (const auto & classifier : classifiers) {
     const auto reason = classifier->debug_reason();
@@ -172,17 +164,14 @@ void LaneEventClassifierDebug::log_state(
 
 void LaneEventClassifierDebug::publish_processing_time(
   const builtin_interfaces::msg::Time & stamp, double total_time_ms,
-  const std::vector<std::pair<std::string, double>> & section_times)
+  const std::vector<std::pair<std::string, double>> & section_times) const
 {
   autoware_internal_debug_msgs::msg::Float64Stamped processing_time_msg;
   processing_time_msg.stamp = stamp;
   processing_time_msg.data = total_time_ms;
   pub_processing_time_->publish(processing_time_msg);
 
-  // Processing-time text overlay: current value with a running max per section, e.g.
-  //   total: 0.33 (max: 1.00) [ms]
-  //   lane_following: 0.08 (max: 0.30) [ms]
-  //   lane_change: 0.05 (max: 0.20) [ms]
+  // Processing-time text overlay, e.g. "total: 0.33 (max: 1.00) [ms]" per section.
   const auto format_processing_time = [this](const std::string & label, double time_ms) {
     double & max_time_ms = max_processing_time_ms_[label];
     max_time_ms = std::max(max_time_ms, time_ms);

@@ -1,4 +1,8 @@
 lane_event_classifier:
+  enable_debug_log:
+    type: bool
+    default_value: false
+    description: Emit the per-cycle diagnostics (the classifier reason strings, the accumulating-departure trace, and the stuck-reference-lane warning). Off by default because they print every second per classifier and drown a shared terminal. State transitions, reference-lane re-anchoring, and missing-input warnings are always logged.
   reposition_jump_margin_m:
     type: double
     default_value: 0.5
@@ -9,6 +13,12 @@ lane_event_classifier:
     type: double
     default_value: 5.0
     description: While the reference lane is held, distance from the ego to that lane above which the tracking state is reset (countermeasure for a manual takeover that drives away from the route)
+    validation:
+      gt<>: [0.0]
+  stuck_reanchor_reset_duration_s:
+    type: double
+    default_value: 2.0
+    description: While the reference lane is not held, seconds the ego must stay both unreachable-forward from the reference lane (reanchor blocked) and beyond lane_departure_reset_distance_m before the tracking state is reset. The tracker only ever re-anchors on forward progress, so without this an unheld reference lane the ego never returns to would otherwise stay stuck forever; the debounce keeps a legitimate in-progress lane change or crossing (not yet held) from being aborted mid-maneuver.
     validation:
       gt<>: [0.0]
   lane_following:
@@ -108,6 +118,12 @@ lane_event_classifier:
       description: Minimum distance an ego footprint corner must poke past the reference lane boundary into a lane outside the sequence for the physical (footprint) crossing source to count, so a slight overhang from cornering is not read as a crossing
       validation:
         gt<>: [0.0]
+    footprint_crossing_object_proximity_m:
+      type: double
+      default_value: 10.0
+      description: Maximum distance from the poking footprint corner to a candidate object for the physical (footprint) crossing source to onset, so the crossing is tied to the object it dodges rather than any candidate merely qualifying within the far longer object_longitudinal_window_m
+      validation:
+        gt<>: [0.0]
     settle_confirm_duration_s:
       type: double
       default_value: 0.7
@@ -128,6 +144,19 @@ lane_event_classifier:
       description: Ahead-of-ego arc-length window along the reference straight sequence in which a candidate object must lie
       validation:
         gt<>: [0.0]
+    object_lateral_buffer_m:
+      type: double
+      default_value: 1.5
+      description: Lateral slack outside the lane-sequence polygons within which an object still counts as on the sequence. An obstacle parked just past the boundary is what the ego dodges just as much as one strictly inside the lane, and perception footprints sit off by a similar margin, so a strict polygon overlap test misses the candidate the crossing is for.
+      validation:
+        gt_eq<>: [0.0]
+    ignored_object_labels:
+      type: string_array
+      default_value: ["UNKNOWN"]
+      description: Perceived-object classifications that never qualify as a candidate object, matched on the highest-probability label. UNKNOWN covers unclassified perception clutter, which is too noisy to justify a crossing.
+      validation:
+        subset_of<>:
+          [["UNKNOWN", "CAR", "TRUCK", "BUS", "TRAILER", "MOTORCYCLE", "BICYCLE", "PEDESTRIAN"]]
     object_qualifying_memory_s:
       type: double
       default_value: 3.0

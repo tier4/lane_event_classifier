@@ -43,10 +43,10 @@ StateStyle style_for_state(uint8_t state)
       return {"ABORTING LANE CHANGE", "#C62828"};
     case DrivingState::INTENTIONAL_LANE_CROSSING:
       return {"INTENTIONAL CROSSING", "#1565C0"};
-    case DrivingState::ABORTING_INTENTIONAL_LANE_CROSSING:
-      return {"ABORTING CROSSING", "#BF360C"};
-    default:  // UNKNOWN
-      return {"UNKNOWN", "#424242"};
+    case DrivingState::UNKNOWN:
+      return {"UNKNOWN", "#6A1B9A"};
+    default:  // UNDEFINED, and any value this build does not know
+      return {"UNDEFINED", "#424242"};
   }
 }
 
@@ -99,14 +99,15 @@ void DrivingFactorPanel::processMessage(
 {
   const auto [label, bg_color] = style_for_state(msg->driving_state.state);
   state_label_->setText(label);
-  state_label_->setStyleSheet(QString("QLabel {"
-                                      "  padding: 12px;"
-                                      "  border-radius: 6px;"
-                                      "  background-color: %1;"
-                                      "  color: white;"
-                                      "  font-size: 14px;"
-                                      "  font-weight: bold;"
-                                      "}")
+  state_label_->setStyleSheet(QString(
+                                "QLabel {"
+                                "  padding: 12px;"
+                                "  border-radius: 6px;"
+                                "  background-color: %1;"
+                                "  color: white;"
+                                "  font-size: 14px;"
+                                "  font-weight: bold;"
+                                "}")
                                 .arg(bg_color));
 }
 

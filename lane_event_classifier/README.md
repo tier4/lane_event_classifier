@@ -54,14 +54,17 @@ defines only the terms specific to it.
 
 ### Output states (`DrivingState`)
 
-| State                                | Value | Meaning                                                                             |
-| ------------------------------------ | ----- | ----------------------------------------------------------------------------------- |
-| `UNKNOWN`                            | 0     | Inputs not ready, **or** the ego left its lane but no classifier claimed the event. |
-| `LANE_FOLLOWING`                     | 1     | The ego is still in its lane and no event is active.                                |
-| `LANE_CHANGING`                      | 2     | The lane-change classifier confirmed a change in progress.                          |
-| `ABORTING_LANE_CHANGE`               | 3     | A committed lane change is reversing back to the reference lane.                    |
-| `INTENTIONAL_LANE_CROSSING`          | 4     | The intentional-crossing classifier confirmed a crossing.                           |
-| `ABORTING_INTENTIONAL_LANE_CROSSING` | 5     | A committed intentional crossing is reversing.                                      |
+| State                       | Value | Meaning                                                          |
+| --------------------------- | ----- | ---------------------------------------------------------------- |
+| `UNDEFINED`                 | 0     | An input was missing, so no classification ran this cycle.       |
+| `LANE_FOLLOWING`            | 1     | The ego is still in its lane and no event is active.             |
+| `LANE_CHANGING`             | 2     | The lane-change classifier confirmed a change in progress.       |
+| `ABORTING_LANE_CHANGE`      | 3     | A committed lane change is reversing back to the reference lane. |
+| `INTENTIONAL_LANE_CROSSING` | 4     | The intentional-crossing classifier confirmed a crossing.        |
+| `UNKNOWN`                   | 6     | The ego left its lane and no classifier claimed the event.       |
+
+Value 5 is retired. It was `ABORTING_INTENTIONAL_LANE_CROSSING`, which no classifier ever
+published.
 
 ---
 
@@ -148,10 +151,11 @@ cycle. Adding a classifier is: implement the interface, then register it in `bui
 Schema: [`schema/lane_event_classifier.schema.yaml`](schema/lane_event_classifier.schema.yaml).
 Defaults: [`param/lane_event_classifier.param.yaml`](param/lane_event_classifier.param.yaml).
 
-| Name                              | Meaning                                                                                                                                                                     |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `reposition_jump_margin_m`        | Localization-noise margin added to the speed-explained step (`speed · dt`); a per-cycle ego step beyond that is treated as a reposition jump and resets the tracking state. |
-| `lane_departure_reset_distance_m` | While the reference lane is held, distance from the ego to that lane above which the tracking state is reset (countermeasure for a manual takeover).                        |
+| Name                              | Meaning                                                                                                                                                                                                                                                                                                                      |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reposition_jump_margin_m`        | Localization-noise margin added to the speed-explained step (`speed · dt`, taking the faster of this cycle's and the previous cycle's speed so braking does not shrink the budget); a per-cycle ego step beyond that is treated as a reposition jump and resets the tracking state.                                          |
+| `lane_departure_reset_distance_m` | While the reference lane is held, distance from the ego to that lane above which the tracking state is reset (countermeasure for a manual takeover).                                                                                                                                                                         |
+| `stuck_reanchor_reset_duration_s` | While the reference lane is not held, seconds the ego must stay both unreachable-forward from it and beyond `lane_departure_reset_distance_m` before the tracking state is reset (the tracker only re-anchors on forward progress, so an unheld reference lane the ego never returns to would otherwise stay stuck forever). |
 
 Lane-following check parameters (`lane_following.*`) are documented in [`docs/lane_following.md`](docs/lane_following.md#parameters).
 

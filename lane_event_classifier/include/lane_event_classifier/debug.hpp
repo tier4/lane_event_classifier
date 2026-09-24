@@ -24,7 +24,6 @@
 
 #include <autoware_internal_debug_msgs/msg/float64_stamped.hpp>
 #include <autoware_internal_debug_msgs/msg/string_stamped.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <lanelet2_core/primitives/Lanelet.h>
 
@@ -45,10 +44,12 @@ public:
   explicit LaneEventClassifierDebug(rclcpp::Node & node);
 
   /**
-   * @brief Publishes the collected classifier markers (no-op if empty).
-   * @param markers Marker array to publish.
+   * @brief Enables or disables the per-cycle diagnostics (enable_debug_log).
+   *
+   * State transitions, reference-lane re-anchoring, and missing-input warnings are unaffected;
+   * only the once-per-second-per-classifier reason strings are gated.
    */
-  void publish_markers(const visualization_msgs::msg::MarkerArray & markers) const;
+  void set_debug_log_enabled(bool enabled) { debug_log_enabled_ = enabled; }
 
   /**
    * @brief Logs a tracking-state reset (see reset_tracking_state) with its cause.
@@ -73,7 +74,7 @@ public:
   void log_state(
     uint8_t current_state, const LaneEventInput & input,
     const LaneFollowingResult & lane_following_result, const LaneTracker & lane_tracker,
-    const std::vector<std::unique_ptr<LaneEventClassifierBase>> & classifiers);
+    const std::vector<std::unique_ptr<LaneEventClassifierBase>> & classifiers) const;
 
   /**
    * @brief Publishes the processing-time value and the per-section text overlay (running max).
@@ -83,24 +84,25 @@ public:
    */
   void publish_processing_time(
     const builtin_interfaces::msg::Time & stamp, double total_time_ms,
-    const std::vector<std::pair<std::string, double>> & section_times);
+    const std::vector<std::pair<std::string, double>> & section_times) const;
 
 private:
   rclcpp::Logger logger_;
   rclcpp::Clock::SharedPtr clock_;
+  bool debug_log_enabled_{false};  // enable_debug_log: gates the per-cycle diagnostics
 
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_markers_;
   rclcpp::Publisher<autoware_internal_debug_msgs::msg::Float64Stamped>::SharedPtr
     pub_processing_time_;
   rclcpp::Publisher<autoware_internal_debug_msgs::msg::StringStamped>::SharedPtr
     pub_processing_time_text_;
 
   // Running maximum per timed section, for the processing-time text overlay.
-  std::unordered_map<std::string, double> max_processing_time_ms_;
+  mutable std::unordered_map<std::string, double> max_processing_time_ms_;
 
-  lanelet::Id previous_reference_lane_id_{
+  mutable lanelet::Id previous_reference_lane_id_{
     lanelet::InvalId};  // last reference lane id, to log re-anchoring
-  uint8_t previously_published_state_{DrivingState::UNKNOWN};  // last state, to log transitions
+  mutable uint8_t previously_published_state_{
+    DrivingState::UNDEFINED};  // last state, to log transitions
 };
 
 }  // namespace lane_event_classifier

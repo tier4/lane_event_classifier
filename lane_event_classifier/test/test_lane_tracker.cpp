@@ -14,6 +14,8 @@
 
 #include "synthetic_lanelet_maps.hpp"
 
+#include <lane_event_classifier/detail/geometry_utils.hpp>
+#include <lane_event_classifier/detail/lane_sequence.hpp>
 #include <lane_event_classifier/detail/lane_tracker.hpp>
 
 #include <gtest/gtest.h>
@@ -32,6 +34,7 @@ using test_maps::make_input;
 using test_maps::make_next_lane_map;
 using test_maps::make_parallel_map;
 using test_maps::make_single_lane_map;
+using test_maps::make_turn_lane_map;
 
 // A lane id that no synthetic map ever mints, for the "unknown id" queries.
 constexpr lanelet::Id kUnknownLaneId = 999999;
@@ -71,11 +74,11 @@ TEST(LaneTrackerTest, update_anchors_reference_to_route_lane)
   LaneTracker tracker;
   ASSERT_TRUE(tracker.set_lanelet_map(make_single_lane_map(lane_id)).has_value());
 
-  tracker.update(make_input({lane_id}, 5.0, 0.0, 0, 0));
+  [[maybe_unused]] const auto update_result = tracker.update(make_input({lane_id}, 5.0, 0.0, 0, 0));
 
   EXPECT_EQ(tracker.reference_lane().reference_lane_id, lane_id);
-  EXPECT_TRUE(tracker.reference_lane().is_reference_lane_on_route);
-  EXPECT_EQ(tracker.last_selected_lane_id(), lane_id);
+  EXPECT_TRUE(tracker.reference_lane().debug_is_reference_lane_on_route);
+  EXPECT_EQ(tracker.debug_last_selected_lane_id(), lane_id);
 }
 
 TEST(LaneTrackerTest, update_anchors_off_route_lane_when_no_route_match)
@@ -85,10 +88,10 @@ TEST(LaneTrackerTest, update_anchors_off_route_lane_when_no_route_match)
   ASSERT_TRUE(tracker.set_lanelet_map(make_single_lane_map(lane_id)).has_value());
 
   // Empty route: the ego still sits inside a lane, so it becomes an off-route reference lane.
-  tracker.update(make_input({}, 5.0, 0.0, 0, 0));
+  [[maybe_unused]] const auto update_result = tracker.update(make_input({}, 5.0, 0.0, 0, 0));
 
   EXPECT_EQ(tracker.reference_lane().reference_lane_id, lane_id);
-  EXPECT_FALSE(tracker.reference_lane().is_reference_lane_on_route);
+  EXPECT_FALSE(tracker.reference_lane().debug_is_reference_lane_on_route);
 }
 
 TEST(LaneTrackerTest, reference_reanchors_on_forward_progress)
@@ -98,14 +101,16 @@ TEST(LaneTrackerTest, reference_reanchors_on_forward_progress)
   LaneTracker tracker;
   ASSERT_TRUE(tracker.set_lanelet_map(make_next_lane_map(id_a, id_b)).has_value());
 
-  tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
+  [[maybe_unused]] const auto update_result =
+    tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
   ASSERT_EQ(tracker.reference_lane().reference_lane_id, id_a);
 
   // Ego advances into lane_b, a next lane of lane_a: the reference lane follows it forward.
-  tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 1, 0));
+  [[maybe_unused]] const auto update_result_2 =
+    tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 1, 0));
   EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_b);
-  EXPECT_EQ(tracker.last_selected_lane_id(), id_b);
-  EXPECT_FALSE(tracker.is_last_reanchor_blocked());
+  EXPECT_EQ(tracker.debug_last_selected_lane_id(), id_b);
+  EXPECT_FALSE(tracker.debug_is_last_reanchor_blocked());
 }
 
 TEST(LaneTrackerTest, reference_holds_across_lateral_move)
@@ -115,15 +120,16 @@ TEST(LaneTrackerTest, reference_holds_across_lateral_move)
   LaneTracker tracker;
   ASSERT_TRUE(tracker.set_lanelet_map(make_parallel_map(id_a, id_b)).has_value());
 
-  tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
+  [[maybe_unused]] const auto update_result =
+    tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
   ASSERT_EQ(tracker.reference_lane().reference_lane_id, id_a);
 
-  // Ego moves sideways into the parallel lane_b (not a next lane): the reference lane must not
-  // advance, and the blocked-reanchor diagnostic fires.
-  tracker.update(make_input({id_a, id_b}, 5.0, 4.0, 1, 0));
+  // A sideways move into parallel lane_b must not advance the reference lane.
+  [[maybe_unused]] const auto update_result_2 =
+    tracker.update(make_input({id_a, id_b}, 5.0, 4.0, 1, 0));
   EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_a);
-  EXPECT_EQ(tracker.last_selected_lane_id(), id_b);
-  EXPECT_TRUE(tracker.is_last_reanchor_blocked());
+  EXPECT_EQ(tracker.debug_last_selected_lane_id(), id_b);
+  EXPECT_TRUE(tracker.debug_is_last_reanchor_blocked());
 }
 
 TEST(LaneTrackerTest, hold_freezes_reference_until_released)
@@ -133,28 +139,78 @@ TEST(LaneTrackerTest, hold_freezes_reference_until_released)
   LaneTracker tracker;
   ASSERT_TRUE(tracker.set_lanelet_map(make_next_lane_map(id_a, id_b)).has_value());
 
-  tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
+  [[maybe_unused]] const auto update_result =
+    tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
   ASSERT_EQ(tracker.reference_lane().reference_lane_id, id_a);
 
   tracker.hold_reference_lane();
   EXPECT_TRUE(tracker.is_reference_lane_held());
 
   // While held the reference lane is frozen even as the ego advances into lane_b.
-  tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 1, 0));
+  const auto update_result_2 = tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 1, 0));
+  EXPECT_TRUE(update_result_2.has_value());
   EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_a);
 
   // Releasing clears the reference so the next update re-anchors to the ego's current lane.
   tracker.release_reference_lane();
   EXPECT_FALSE(tracker.is_reference_lane_held());
-  tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 2, 0));
+  [[maybe_unused]] const auto update_result_3 =
+    tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 2, 0));
   EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_b);
 }
 
-// Regression: after an event completes in a lane that is not a forward successor of the reference
-// (a lane change into a parallel lane), releasing the hold must re-anchor the reference to that
-// parallel lane. Without the release the reference stays pinned to the origin lane forever (the
-// tracker only advances into a forward successor), so the classifier re-detects the same crossing
-// every cycle. The node wires hold-on-active / release-on-completion to drive exactly this.
+// The hold policy the node applies each cycle: freeze while an event runs, thaw when none does.
+TEST(LaneTrackerTest, apply_hold_freezes_while_requested_and_thaws_when_not)
+{
+  lanelet::Id id_a = lanelet::InvalId;
+  lanelet::Id id_b = lanelet::InvalId;
+  LaneTracker tracker;
+  ASSERT_TRUE(tracker.set_lanelet_map(make_next_lane_map(id_a, id_b)).has_value());
+
+  [[maybe_unused]] const auto update_result =
+    tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
+  ASSERT_EQ(tracker.reference_lane().reference_lane_id, id_a);
+
+  // No event requested, so nothing is held.
+  tracker.apply_reference_lane_hold(false);
+  EXPECT_FALSE(tracker.is_reference_lane_held());
+
+  // An event begins and the reference lane freezes.
+  tracker.apply_reference_lane_hold(true);
+  EXPECT_TRUE(tracker.is_reference_lane_held());
+
+  // The event continues, so the hold stays.
+  tracker.apply_reference_lane_hold(true);
+  EXPECT_TRUE(tracker.is_reference_lane_held());
+
+  // The event ends and the hold is released, so the next update re-anchors.
+  tracker.apply_reference_lane_hold(false);
+  EXPECT_FALSE(tracker.is_reference_lane_held());
+  [[maybe_unused]] const auto update_result_2 =
+    tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 1, 0));
+  EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_b);
+}
+
+// A held turn / intersection reference lane thaws even while an event is still requested.
+TEST(LaneTrackerTest, apply_hold_releases_a_held_turn_lane)
+{
+  lanelet::Id lane_id = lanelet::InvalId;
+  LaneTracker tracker;
+  ASSERT_TRUE(tracker.set_lanelet_map(make_turn_lane_map(lane_id)).has_value());
+
+  [[maybe_unused]] const auto update_result = tracker.update(make_input({lane_id}, 5.0, 0.0, 0, 0));
+  ASSERT_EQ(tracker.reference_lane().reference_lane_id, lane_id);
+  ASSERT_TRUE(tracker.reference_lane().is_reference_lane_intersection);
+
+  tracker.apply_reference_lane_hold(true);
+  ASSERT_TRUE(tracker.is_reference_lane_held());
+
+  // Still requested, but a turn lane never stays frozen.
+  tracker.apply_reference_lane_hold(true);
+  EXPECT_FALSE(tracker.is_reference_lane_held());
+}
+
+// Regression: releasing the hold must re-anchor the reference to the parallel lane.
 TEST(LaneTrackerTest, release_reanchors_to_parallel_lane_after_hold)
 {
   lanelet::Id id_a = lanelet::InvalId;
@@ -162,22 +218,22 @@ TEST(LaneTrackerTest, release_reanchors_to_parallel_lane_after_hold)
   LaneTracker tracker;
   ASSERT_TRUE(tracker.set_lanelet_map(make_parallel_map(id_a, id_b)).has_value());
 
-  tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
+  [[maybe_unused]] const auto update_result =
+    tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
   ASSERT_EQ(tracker.reference_lane().reference_lane_id, id_a);
 
-  // An event begins: the node freezes the reference lane, and the ego crosses fully into the
-  // parallel lane_b (not a next lane of lane_a). The reference must stay pinned to lane_a.
+  // An event begins and the ego crosses into lane_b, so the reference stays pinned to lane_a.
   tracker.hold_reference_lane();
-  tracker.update(make_input({id_a, id_b}, 5.0, 4.0, 1, 0));
+  [[maybe_unused]] const auto update_result_2 =
+    tracker.update(make_input({id_a, id_b}, 5.0, 4.0, 1, 0));
   EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_a);
 
-  // The event completes: releasing re-anchors the reference to the parallel lane the ego settled
-  // into (lane_b) rather than leaving it stuck on lane_a. lane_b is not a successor of lane_a, so
-  // this only works because release clears the reference first.
+  // The event completes, so releasing re-anchors the reference to lane_b.
   tracker.release_reference_lane();
-  tracker.update(make_input({id_a, id_b}, 5.0, 4.0, 2, 0));
+  [[maybe_unused]] const auto update_result_3 =
+    tracker.update(make_input({id_a, id_b}, 5.0, 4.0, 2, 0));
   EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_b);
-  EXPECT_FALSE(tracker.is_last_reanchor_blocked());
+  EXPECT_FALSE(tracker.debug_is_last_reanchor_blocked());
 }
 
 TEST(LaneTrackerTest, distance_to_lane_reports_inside_outside_and_unknown)
@@ -253,13 +309,10 @@ TEST(LaneTrackerTest, straight_lane_sequence_spans_connected_lanes)
 
   const auto lane_a = tracker.get_lanelet(id_a);
   ASSERT_TRUE(lane_a.has_value());
-  const auto & sequence_ids = tracker.straight_lane_sequence_ids(*lane_a, 100.0);
+  const auto sequence_ids =
+    get_straight_lane_sequence_ids(*lane_a, tracker.routing_graph_ptr(), 100.0);
   EXPECT_NE(sequence_ids.count(id_a), 0u);
   EXPECT_NE(sequence_ids.count(id_b), 0u);
-
-  // A repeat query with the same arguments returns the memoized set unchanged.
-  const auto & cached_ids = tracker.straight_lane_sequence_ids(*lane_a, 100.0);
-  EXPECT_EQ(cached_ids, sequence_ids);
 }
 
 TEST(LaneTrackerTest, route_primitive_cache_tracks_current_route)
@@ -269,10 +322,60 @@ TEST(LaneTrackerTest, route_primitive_cache_tracks_current_route)
   LaneTracker tracker;
   ASSERT_TRUE(tracker.set_lanelet_map(make_next_lane_map(id_a, id_b)).has_value());
 
-  tracker.update(make_input({id_a}, 5.0, 0.0, 0, 0));
+  [[maybe_unused]] const auto update_result = tracker.update(make_input({id_a}, 5.0, 0.0, 0, 0));
   EXPECT_TRUE(tracker.is_route_primitive(id_a));
   EXPECT_FALSE(tracker.is_route_primitive(id_b));
-  EXPECT_NE(tracker.route_primitive_ids().count(id_a), 0u);
+}
+
+// A braking step travelled at the previous speed reads as a localization jump if judged now.
+TEST(RepositionJumpTest, braking_between_cycles_is_not_a_jump)
+{
+  constexpr double noise_margin_m = 0.5;
+  const EgoMotionSample moving{{0.0, 0.0}, 10.0, 0.0};
+  const EgoMotionSample braked{{4.0, 0.0}, 0.0, 0.5};
+
+  EXPECT_FALSE(is_reposition_jump(moving, braked, noise_margin_m));
+  // A step no speed in either sample explains is still a jump.
+  const EgoMotionSample teleported{{40.0, 0.0}, 0.0, 0.5};
+  EXPECT_TRUE(is_reposition_jump(moving, teleported, noise_margin_m));
+}
+
+TEST(RepositionJumpTest, a_backward_nudge_at_a_standstill_is_a_jump)
+{
+  constexpr double noise_margin_m = 0.5;
+  const EgoMotionSample stopped{{5.0, 0.0}, 0.0, 0.0};
+  const EgoMotionSample nudged_back{{3.0, 0.0}, 0.0, 0.1};
+
+  EXPECT_TRUE(is_reposition_jump(stopped, nudged_back, noise_margin_m));
+}
+
+TEST(RepositionJumpTest, a_non_advancing_stamp_is_never_a_jump)
+{
+  const EgoMotionSample first{{0.0, 0.0}, 0.0, 1.0};
+  const EgoMotionSample same_stamp{{50.0, 0.0}, 0.0, 1.0};
+
+  EXPECT_FALSE(is_reposition_jump(first, same_stamp, 0.5));
+}
+
+TEST(StuckReanchorTest, blocked_and_far_is_stuck)
+{
+  EXPECT_TRUE(is_stuck_and_far_from_reference(true, 10.0, 5.0));
+}
+
+TEST(StuckReanchorTest, blocked_but_within_distance_is_not_stuck)
+{
+  EXPECT_FALSE(is_stuck_and_far_from_reference(true, 3.0, 5.0));
+}
+
+TEST(StuckReanchorTest, far_but_not_blocked_is_not_stuck)
+{
+  // Only a blocked reanchor means the tracker cannot recover on its own.
+  EXPECT_FALSE(is_stuck_and_far_from_reference(false, 10.0, 5.0));
+}
+
+TEST(StuckReanchorTest, unknown_distance_is_not_stuck)
+{
+  EXPECT_FALSE(is_stuck_and_far_from_reference(true, std::nullopt, 5.0));
 }
 
 }  // namespace lane_event_classifier

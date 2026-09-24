@@ -59,6 +59,34 @@ namespace lane_event_classifier
   return ids;
 }
 
+/** @brief Memoizes get_straight_lane_sequence_ids() while the lane and routing graph hold. */
+class StraightLaneSequenceCache
+{
+public:
+  /** @brief Returns the memoized set, recomputing only on a lane-id or routing-graph change. */
+  [[nodiscard]] const std::unordered_set<lanelet::Id> & get(
+    const lanelet::ConstLanelet & lane,
+    const lanelet::routing::RoutingGraphConstPtr & routing_graph, double reach_m)
+  {
+    if (
+      routing_graph == cached_graph_ptr_ && lane.id() == cached_lane_id_ &&
+      reach_m == cached_reach_m_) {
+      return cached_ids_;
+    }
+    cached_graph_ptr_ = routing_graph;
+    cached_lane_id_ = lane.id();
+    cached_reach_m_ = reach_m;
+    cached_ids_ = get_straight_lane_sequence_ids(lane, routing_graph, reach_m);
+    return cached_ids_;
+  }
+
+private:
+  lanelet::routing::RoutingGraphConstPtr cached_graph_ptr_;
+  lanelet::Id cached_lane_id_{lanelet::InvalId};
+  double cached_reach_m_{-1.0};
+  std::unordered_set<lanelet::Id> cached_ids_;
+};
+
 }  // namespace lane_event_classifier
 
 #endif  // LANE_EVENT_CLASSIFIER__DETAIL__LANE_SEQUENCE_HPP_
