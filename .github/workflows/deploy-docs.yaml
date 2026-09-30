@@ -1,6 +1,5 @@
-# This file is automatically synced from:
-# https://github.com/autowarefoundation/sync-file-templates
-# To make changes, update the source repository and follow the guidelines in its README.
+# Based on https://github.com/autowarefoundation/sync-file-templates.
+# Kept locally rather than synced: job permissions are added so GITHUB_TOKEN can push to gh-pages.
 
 name: deploy-docs
 
@@ -35,6 +34,9 @@ jobs:
     needs: make-sure-label-is-present
     if: ${{ github.event_name != 'pull_request_target' || needs.make-sure-label-is-present.outputs.result == 'true' }}
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
