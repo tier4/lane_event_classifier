@@ -36,7 +36,7 @@ autoware_agnocast_wrapper_register_node(${PROJECT_NAME}_lib
   PLUGIN "lane_event_classifier::LaneEventClassifierNode"
   EXECUTABLE ${PROJECT_NAME}_node
   ROS2_EXECUTOR SingleThreadedExecutor
-  AGNOCAST_EXECUTOR AgnocastOnlySingleThreadedExecutor
+  AGNOCAST_EXECUTOR AgnocastOnlyCallbackIsolatedExecutor
 )
 
 if(BUILD_TESTING)
