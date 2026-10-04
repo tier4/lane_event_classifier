@@ -15,6 +15,7 @@
 #ifndef LANE_EVENT_CLASSIFIER__DEBUG_HPP_
 #define LANE_EVENT_CLASSIFIER__DEBUG_HPP_
 
+#include <autoware/agnocast_wrapper/node.hpp>
 #include <builtin_interfaces/msg/time.hpp>
 #include <lane_event_classifier/detail/lane_tracker.hpp>
 #include <lane_event_classifier/lane_event_classifier_base.hpp>
@@ -41,7 +42,7 @@ namespace lane_event_classifier
 class LaneEventClassifierDebug
 {
 public:
-  explicit LaneEventClassifierDebug(rclcpp::Node & node);
+  explicit LaneEventClassifierDebug(autoware::agnocast_wrapper::Node & node);
 
   /**
    * @brief Enables or disables the per-cycle diagnostics (enable_debug_log).
@@ -91,10 +92,10 @@ private:
   rclcpp::Clock::SharedPtr clock_;
   bool debug_log_enabled_{false};  // enable_debug_log: gates the per-cycle diagnostics
 
-  rclcpp::Publisher<autoware_internal_debug_msgs::msg::Float64Stamped>::SharedPtr
-    pub_processing_time_;
-  rclcpp::Publisher<autoware_internal_debug_msgs::msg::StringStamped>::SharedPtr
-    pub_processing_time_text_;
+  AUTOWARE_PUBLISHER_PTR(autoware_internal_debug_msgs::msg::Float64Stamped)
+  pub_processing_time_;
+  AUTOWARE_PUBLISHER_PTR(autoware_internal_debug_msgs::msg::StringStamped)
+  pub_processing_time_text_;
 
   // Running maximum per timed section, for the processing-time text overlay.
   mutable std::unordered_map<std::string, double> max_processing_time_ms_;

@@ -32,9 +32,11 @@ target_link_libraries(${PROJECT_NAME}_lib
 # Suppress deprecated-declarations from generate_parameter_library internals
 target_compile_options(${PROJECT_NAME}_lib PRIVATE -Wno-deprecated-declarations)
 
-rclcpp_components_register_node(${PROJECT_NAME}_lib
+autoware_agnocast_wrapper_register_node(${PROJECT_NAME}_lib
   PLUGIN "lane_event_classifier::LaneEventClassifierNode"
   EXECUTABLE ${PROJECT_NAME}_node
+  ROS2_EXECUTOR SingleThreadedExecutor
+  AGNOCAST_EXECUTOR AgnocastOnlySingleThreadedExecutor
 )
 
 if(BUILD_TESTING)
