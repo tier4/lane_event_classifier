@@ -15,8 +15,9 @@
 #ifndef LANE_EVENT_CLASSIFIER__LANE_EVENT_CLASSIFIER_NODE_HPP_
 #define LANE_EVENT_CLASSIFIER__LANE_EVENT_CLASSIFIER_NODE_HPP_
 
+#include <autoware/agnocast_wrapper/node.hpp>
+#include <autoware/agnocast_wrapper/polling_subscriber.hpp>
 #include <autoware/vehicle_info_utils/vehicle_info_utils.hpp>
-#include <autoware_utils/ros/polling_subscriber.hpp>
 #include <lane_event_classifier/debug.hpp>
 #include <lane_event_classifier/detail/debounced_signal.hpp>
 #include <lane_event_classifier/detail/geometry_utils.hpp>
@@ -48,7 +49,7 @@ namespace lane_event_classifier
 {
 
 /** @brief ROS node that classifies lane events from trajectory, odometry, route, and map inputs. */
-class LaneEventClassifierNode : public rclcpp::Node
+class LaneEventClassifierNode : public autoware::agnocast_wrapper::Node
 {
 public:
   explicit LaneEventClassifierNode(const rclcpp::NodeOptions & node_options);
@@ -68,32 +69,43 @@ private:
   void reset_tracking_state(const std::string & tracking_reset_reason);
 
   // Publishers
-  rclcpp::Publisher<lane_event_classifier_msgs::msg::DrivingFactor>::SharedPtr pub_driving_factor_;
+  AUTOWARE_PUBLISHER_PTR(lane_event_classifier_msgs::msg::DrivingFactor) pub_driving_factor_;
 
   // Parameters
   ::lane_event_classifier::ParamListener param_listener_;
   ::lane_event_classifier::Params params_;
 
   // Map: one-shot callback — fires once (or on rare map reload)
-  rclcpp::Subscription<autoware_map_msgs::msg::LaneletMapBin>::SharedPtr sub_map_;
+  AUTOWARE_SUBSCRIPTION_PTR(autoware_map_msgs::msg::LaneletMapBin) sub_map_;
 
   // Route: polling — lane IDs refreshed only on UUID change
-  autoware_utils::InterProcessPollingSubscriber<
-    autoware_planning_msgs::msg::LaneletRoute, autoware_utils::polling_policy::Latest>
-    sub_route_{this, "/planning/mission_planning/route", rclcpp::QoS{1}.transient_local()};
+  autoware::agnocast_wrapper::polling::PollingSubscriber<
+    autoware_planning_msgs::msg::LaneletRoute,
+    autoware::agnocast_wrapper::polling::polling_policy::Latest>::SharedPtr sub_route_{
+    autoware::agnocast_wrapper::polling::create_polling_subscriber<
+      autoware_planning_msgs::msg::LaneletRoute>(
+      this, "/planning/mission_planning/route", rclcpp::QoS{1}.transient_local())};
 
   // Trajectory: callback-driven — one classification per received trajectory
-  rclcpp::Subscription<autoware_planning_msgs::msg::Trajectory>::SharedPtr sub_trajectory_;
+  AUTOWARE_SUBSCRIPTION_PTR(autoware_planning_msgs::msg::Trajectory) sub_trajectory_;
 
   // Dynamic inputs (polled on trajectory arrival)
-  autoware_utils::InterProcessPollingSubscriber<nav_msgs::msg::Odometry> sub_odometry_{
-    this, "/localization/kinematic_state", rclcpp::QoS{1}};
+  autoware::agnocast_wrapper::polling::PollingSubscriber<nav_msgs::msg::Odometry>::SharedPtr
+    sub_odometry_{
+      autoware::agnocast_wrapper::polling::create_polling_subscriber<nav_msgs::msg::Odometry>(
+        this, "/localization/kinematic_state", rclcpp::QoS{1})};
 
-  autoware_utils::InterProcessPollingSubscriber<autoware_perception_msgs::msg::PredictedObjects>
-    sub_objects_{this, "/perception/object_recognition/objects", rclcpp::QoS{1}};
+  autoware::agnocast_wrapper::polling::PollingSubscriber<
+    autoware_perception_msgs::msg::PredictedObjects>::SharedPtr sub_objects_{
+    autoware::agnocast_wrapper::polling::create_polling_subscriber<
+      autoware_perception_msgs::msg::PredictedObjects>(
+      this, "/perception/object_recognition/objects", rclcpp::QoS{1})};
 
-  autoware_utils::InterProcessPollingSubscriber<autoware_vehicle_msgs::msg::TurnIndicatorsReport>
-    sub_turn_indicators_{this, "/vehicle/status/turn_indicators_status"};
+  autoware::agnocast_wrapper::polling::PollingSubscriber<
+    autoware_vehicle_msgs::msg::TurnIndicatorsReport>::SharedPtr sub_turn_indicators_{
+    autoware::agnocast_wrapper::polling::create_polling_subscriber<
+      autoware_vehicle_msgs::msg::TurnIndicatorsReport>(
+      this, "/vehicle/status/turn_indicators_status")};
 
   // Internal state passed to classifiers each cycle
   LaneEventInput input_;

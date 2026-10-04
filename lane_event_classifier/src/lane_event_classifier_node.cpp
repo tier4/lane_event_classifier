@@ -99,13 +99,13 @@ tl::expected<void, std::string> LaneEventClassifierNode::take_data(
 {
   input_.trajectory_ptr = trajectory_msg;
 
-  const auto odometry_msg = sub_odometry_.take_data();
+  const auto odometry_msg = sub_odometry_->take_data();
   if (!odometry_msg) {
     return tl::make_unexpected("odometry_msg not available");
   }
   input_.odometry_ptr = odometry_msg;
 
-  auto objects_msg = sub_objects_.take_data();
+  auto objects_msg = sub_objects_->take_data();
   if (!objects_msg) {
     return tl::make_unexpected("perceived objects_msg not available");
   }
@@ -115,7 +115,7 @@ tl::expected<void, std::string> LaneEventClassifierNode::take_data(
     return tl::make_unexpected("lanelet map not yet available");
   }
 
-  auto route_msg = sub_route_.take_data();
+  auto route_msg = sub_route_->take_data();
   if (!route_msg) {
     return tl::make_unexpected("route_msg not available");
   }
@@ -134,7 +134,7 @@ tl::expected<void, std::string> LaneEventClassifierNode::take_data(
   }
 
   // Turn indicator is optional: keep the previous value rather than failing the cycle.
-  if (const auto turn_indicators_msg = sub_turn_indicators_.take_data()) {
+  if (const auto turn_indicators_msg = sub_turn_indicators_->take_data()) {
     input_.turn_indicator = turn_indicators_msg->report;
   }
 
