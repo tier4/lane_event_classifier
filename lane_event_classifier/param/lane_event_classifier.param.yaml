@@ -22,9 +22,9 @@
       crossing_look_ahead_m: 30.0
       predictive_lateral_trigger_distance_m: 0.5
       crossing_persist_duration_s: 0.3
-      crossing_position_tolerance_m: 2.0
+      crossing_position_tolerance_m: 5.0
       footprint_boundary_overshoot_m: 0.3
-      footprint_crossing_object_proximity_m: 10.0
+      footprint_crossing_object_proximity_m: 75.0
       settle_confirm_duration_s: 0.7
       confidence_factor: 0.3
       object_longitudinal_window_m: 100.0
