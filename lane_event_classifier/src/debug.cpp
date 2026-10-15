@@ -47,7 +47,7 @@ const char * state_to_string(uint8_t state)
 }
 }  // namespace
 
-LaneEventClassifierDebug::LaneEventClassifierDebug(rclcpp::Node & node)
+LaneEventClassifierDebug::LaneEventClassifierDebug(autoware::agnocast_wrapper::Node & node)
 : logger_{node.get_logger()}, clock_{node.get_clock()}
 {
   pub_processing_time_ = node.create_publisher<autoware_internal_debug_msgs::msg::Float64Stamped>(
