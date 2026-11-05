@@ -32,7 +32,7 @@ jobs:
         run: echo "PR_FETCH_DEPTH=$(( ${{ github.event.pull_request.commits }} + 1 ))" >> "${GITHUB_ENV}"
 
       - name: Checkout PR branch and all PR commits
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: ${{ env.PR_FETCH_DEPTH }}
@@ -46,11 +46,11 @@ jobs:
         shell: bash
 
       - name: Remove exec_depend
-        uses: autowarefoundation/autoware-github-actions/remove-exec-depend@v1
+        uses: autowarefoundation/autoware-github-actions/remove-exec-depend@v1.69.1
 
       - name: Get modified packages
         id: get-modified-packages
-        uses: autowarefoundation/autoware-github-actions/get-modified-packages@v1
+        uses: autowarefoundation/autoware-github-actions/get-modified-packages@v1.69.1
 
       - name: Get changed files (existing files only)
         id: get-changed-files
@@ -60,7 +60,7 @@ jobs:
 
       - name: Run clang-tidy
         if: ${{ steps.get-changed-files.outputs.changed-files != '' }}
-        uses: autowarefoundation/autoware-github-actions/clang-tidy@v1
+        uses: autowarefoundation/autoware-github-actions/clang-tidy@v1.69.1
         with:
           rosdistro: ${{ inputs.rosdistro }}
           target-packages: ${{ steps.get-modified-packages.outputs.modified-packages }}

@@ -53,7 +53,7 @@ jobs:
     container: ${{ inputs.container }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           fetch-depth: 1
 
@@ -64,11 +64,11 @@ jobs:
         run: lscpu && free -h
 
       - name: Remove exec_depend
-        uses: autowarefoundation/autoware-github-actions/remove-exec-depend@v1
+        uses: autowarefoundation/autoware-github-actions/remove-exec-depend@v1.69.1
 
       - name: Get self packages
         id: get-self-packages
-        uses: autowarefoundation/autoware-github-actions/get-self-packages@v1
+        uses: autowarefoundation/autoware-github-actions/get-self-packages@v1.69.1
 
       - name: Create ccache directory
         if: ${{ inputs.pull-ccache || inputs.push-ccache }}
@@ -79,7 +79,7 @@ jobs:
 
       - name: Attempt to restore ccache
         if: ${{ inputs.pull-ccache }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v4.3.0
         with:
           path: |
             /root/.ccache
@@ -103,7 +103,7 @@ jobs:
 
       - name: Build
         if: ${{ steps.get-self-packages.outputs.self-packages != '' }}
-        uses: autowarefoundation/autoware-github-actions/colcon-build@v1
+        uses: autowarefoundation/autoware-github-actions/colcon-build@v1.69.1
         with:
           rosdistro: ${{ inputs.rosdistro }}
           target-packages: ${{ steps.get-self-packages.outputs.self-packages }}
@@ -117,7 +117,7 @@ jobs:
 
       - name: Push the ccache cache
         if: ${{ inputs.push-ccache }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v4.3.0
         with:
           path: |
             /root/.ccache
@@ -125,7 +125,7 @@ jobs:
 
       - name: Test
         if: ${{ steps.get-self-packages.outputs.self-packages != '' }}
-        uses: autowarefoundation/autoware-github-actions/colcon-test@v1
+        uses: autowarefoundation/autoware-github-actions/colcon-test@v1.69.1
         with:
           rosdistro: ${{ inputs.rosdistro }}
           target-packages: ${{ steps.get-self-packages.outputs.self-packages }}
