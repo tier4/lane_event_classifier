@@ -14,11 +14,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
       - name: Delete closed PR docs
-        uses: autowarefoundation/autoware-github-actions/delete-closed-pr-docs@v1
+        uses: autowarefoundation/autoware-github-actions/delete-closed-pr-docs@v1.69.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
