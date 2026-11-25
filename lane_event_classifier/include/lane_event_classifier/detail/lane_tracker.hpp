@@ -103,9 +103,10 @@ public:
     lanelet::Id lane_id, const lanelet::BasicPoint2d & point) const;
 
   /**
-   * @brief 2D distance from the point to the lane or to the nearest of its next lanes (0 while
-   * inside one of them).
-   * @param lane_id Lanelet id to measure against, together with its next lanes.
+   * @brief 2D distance from the point to the lane or to the nearest of its next lanes that a held
+   * reference lane can move into, so not an intersection or a road shoulder lane (0 while inside
+   * one of them).
+   * @param lane_id Lanelet id to measure against, together with those next lanes.
    * @param point Query point in the map frame.
    * @return The distance in metres, or nullopt if the lane id is unknown.
    */
