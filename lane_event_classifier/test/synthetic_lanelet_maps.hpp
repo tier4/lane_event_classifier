@@ -109,6 +109,37 @@ inline lanelet::LaneletMapPtr make_parallel_map(lanelet::Id & id_a, lanelet::Id 
   return map;
 }
 
+// Two parallel lanes with a seam at x=10, both x=[0,20]. Lane A (y=[-2,2]) is a1 -> a2, and lane B
+// (y=[2,6]) is b1 -> b2. The lanes share no points, so a2 is the only next lane of a1, and b2 of b1.
+inline lanelet::LaneletMapPtr make_two_lane_seam_map(
+  lanelet::Id & id_a1, lanelet::Id & id_a2, lanelet::Id & id_b1, lanelet::Id & id_b2)
+{
+  auto map = std::make_shared<lanelet::LaneletMap>();
+  auto add_lane = [&map](double y_right, double y_left, lanelet::Id & first_id, lanelet::Id & second_id) {
+    lanelet::Point3d l0(lanelet::utils::getId(), 0.0, y_left, 0.0);
+    lanelet::Point3d l1(lanelet::utils::getId(), 10.0, y_left, 0.0);
+    lanelet::Point3d l2(lanelet::utils::getId(), 20.0, y_left, 0.0);
+    lanelet::Point3d r0(lanelet::utils::getId(), 0.0, y_right, 0.0);
+    lanelet::Point3d r1(lanelet::utils::getId(), 10.0, y_right, 0.0);
+    lanelet::Point3d r2(lanelet::utils::getId(), 20.0, y_right, 0.0);
+    lanelet::Lanelet first(
+      lanelet::utils::getId(), lanelet::LineString3d(lanelet::utils::getId(), {l0, l1}),
+      lanelet::LineString3d(lanelet::utils::getId(), {r0, r1}));
+    lanelet::Lanelet second(
+      lanelet::utils::getId(), lanelet::LineString3d(lanelet::utils::getId(), {l1, l2}),
+      lanelet::LineString3d(lanelet::utils::getId(), {r1, r2}));
+    mark_road(first);
+    mark_road(second);
+    first_id = first.id();
+    second_id = second.id();
+    map->add(first);
+    map->add(second);
+  };
+  add_lane(-2.0, 2.0, id_a1, id_a2);
+  add_lane(2.0, 6.0, id_b1, id_b2);
+  return map;
+}
+
 // Single straight lanelet (x=[0,10], y=[-2,2]) tagged as a turn-direction lane.
 inline lanelet::LaneletMapPtr make_turn_lane_map(lanelet::Id & lane_id_out)
 {

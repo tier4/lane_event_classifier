@@ -35,6 +35,7 @@ using test_maps::make_next_lane_map;
 using test_maps::make_parallel_map;
 using test_maps::make_single_lane_map;
 using test_maps::make_turn_lane_map;
+using test_maps::make_two_lane_seam_map;
 
 // A lane id that no synthetic map ever mints, for the "unknown id" queries.
 constexpr lanelet::Id kUnknownLaneId = 999999;
@@ -132,7 +133,7 @@ TEST(LaneTrackerTest, reference_holds_across_lateral_move)
   EXPECT_TRUE(tracker.debug_is_last_reanchor_blocked());
 }
 
-TEST(LaneTrackerTest, hold_freezes_reference_until_released)
+TEST(LaneTrackerTest, hold_moves_reference_forward_until_released)
 {
   lanelet::Id id_a = lanelet::InvalId;
   lanelet::Id id_b = lanelet::InvalId;
@@ -146,17 +147,87 @@ TEST(LaneTrackerTest, hold_freezes_reference_until_released)
   tracker.hold_reference_lane();
   EXPECT_TRUE(tracker.is_reference_lane_held());
 
-  // While held the reference lane is frozen even as the ego advances into lane_b.
+  // While held, the ego advances into lane_b, a next lane of lane_a, so the held lane follows it
+  // and stays held.
   const auto update_result_2 = tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 1, 0));
   EXPECT_TRUE(update_result_2.has_value());
-  EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_a);
+  EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_b);
+  EXPECT_TRUE(tracker.is_reference_lane_held());
 
-  // Releasing clears the reference so the next update re-anchors to the ego's current lane.
+  // Releasing still clears the reference, so the next update re-anchors to the ego's current lane.
   tracker.release_reference_lane();
   EXPECT_FALSE(tracker.is_reference_lane_held());
+  EXPECT_EQ(tracker.reference_lane().reference_lane_id, lanelet::InvalId);
   [[maybe_unused]] const auto update_result_3 =
     tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 2, 0));
   EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_b);
+}
+
+// While held, a move into the next lane of a side lane is still a sideways move: base_link in b2
+// (beside a2) does not move the held lane a1, because b2 is not a next lane of a1.
+TEST(LaneTrackerTest, hold_does_not_move_reference_into_side_lane)
+{
+  lanelet::Id id_a1 = lanelet::InvalId;
+  lanelet::Id id_a2 = lanelet::InvalId;
+  lanelet::Id id_b1 = lanelet::InvalId;
+  lanelet::Id id_b2 = lanelet::InvalId;
+  LaneTracker tracker;
+  ASSERT_TRUE(
+    tracker.set_lanelet_map(make_two_lane_seam_map(id_a1, id_a2, id_b1, id_b2)).has_value());
+
+  // The route changes from lane A to lane B, as in a lane change.
+  [[maybe_unused]] const auto update_result =
+    tracker.update(make_input({id_a1, id_b2}, 5.0, 0.0, 0, 0));
+  ASSERT_EQ(tracker.reference_lane().reference_lane_id, id_a1);
+
+  tracker.hold_reference_lane();
+  [[maybe_unused]] const auto update_result_2 =
+    tracker.update(make_input({id_a1, id_b2}, 15.0, 4.0, 1, 0));
+  EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_a1);
+  EXPECT_TRUE(tracker.is_reference_lane_held());
+}
+
+// A held lane does not move into a next lane with turn_direction, even "straight", because
+// apply_reference_lane_hold releases a held intersection lane at once.
+TEST(LaneTrackerTest, hold_does_not_move_reference_into_turn_lane)
+{
+  lanelet::Id id_a = lanelet::InvalId;
+  lanelet::Id id_b = lanelet::InvalId;
+  auto map = make_next_lane_map(id_a, id_b);
+  map->laneletLayer.get(id_b).attributes()["turn_direction"] = "straight";
+  LaneTracker tracker;
+  ASSERT_TRUE(tracker.set_lanelet_map(map).has_value());
+
+  [[maybe_unused]] const auto update_result =
+    tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
+  ASSERT_EQ(tracker.reference_lane().reference_lane_id, id_a);
+
+  tracker.hold_reference_lane();
+  [[maybe_unused]] const auto update_result_2 =
+    tracker.update(make_input({id_a, id_b}, 15.0, 0.0, 1, 0));
+  EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_a);
+  EXPECT_FALSE(tracker.reference_lane().is_reference_lane_intersection);
+  EXPECT_TRUE(tracker.is_reference_lane_held());
+}
+
+// The stuck test after an event (trigger 3) reads the blocked flag in the first cycle after a
+// release, so an update while held leaves the flag false, even for a sideways move.
+TEST(LaneTrackerTest, held_update_does_not_report_blocked_reanchor)
+{
+  lanelet::Id id_a = lanelet::InvalId;
+  lanelet::Id id_b = lanelet::InvalId;
+  LaneTracker tracker;
+  ASSERT_TRUE(tracker.set_lanelet_map(make_parallel_map(id_a, id_b)).has_value());
+
+  [[maybe_unused]] const auto update_result =
+    tracker.update(make_input({id_a, id_b}, 5.0, 0.0, 0, 0));
+  ASSERT_EQ(tracker.reference_lane().reference_lane_id, id_a);
+
+  tracker.hold_reference_lane();
+  [[maybe_unused]] const auto update_result_2 =
+    tracker.update(make_input({id_a, id_b}, 5.0, 4.0, 1, 0));
+  EXPECT_EQ(tracker.reference_lane().reference_lane_id, id_a);
+  EXPECT_FALSE(tracker.debug_is_last_reanchor_blocked());
 }
 
 // The hold policy the node applies each cycle: freeze while an event runs, thaw when none does.
@@ -252,6 +323,25 @@ TEST(LaneTrackerTest, distance_to_lane_reports_inside_outside_and_unknown)
   EXPECT_NEAR(*outside, 8.0, 1e-6);
 
   EXPECT_FALSE(tracker.distance_to_lane(kUnknownLaneId, {5.0, 0.0}).has_value());
+}
+
+// The departure reset (trigger 2) measures to the held lane or a next lane of it. With a1 held,
+// base_link in b2 beside a2 is 2 m from a2 (half of the 4 m lane), but 5.39 m from a1.
+TEST(LaneTrackerTest, distance_to_lane_or_next_counts_next_lanes)
+{
+  lanelet::Id id_a1 = lanelet::InvalId;
+  lanelet::Id id_a2 = lanelet::InvalId;
+  lanelet::Id id_b1 = lanelet::InvalId;
+  lanelet::Id id_b2 = lanelet::InvalId;
+  LaneTracker tracker;
+  ASSERT_TRUE(
+    tracker.set_lanelet_map(make_two_lane_seam_map(id_a1, id_a2, id_b1, id_b2)).has_value());
+
+  const auto distance = tracker.distance_to_lane_or_next(id_a1, {15.0, 4.0});
+  ASSERT_TRUE(distance.has_value());
+  EXPECT_NEAR(*distance, 2.0, 1e-6);
+
+  EXPECT_FALSE(tracker.distance_to_lane_or_next(kUnknownLaneId, {15.0, 4.0}).has_value());
 }
 
 TEST(LaneTrackerTest, lanelet_lookup_helpers)
