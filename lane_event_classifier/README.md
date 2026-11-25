@@ -73,8 +73,9 @@ published.
 > **The lane-following check.** `LaneFollowingChecker` answers one yes/no question: _is the ego
 > still inside the lane it is supposed to be following?_ Its result is
 > the **default label**: when no classifier claims an event, the check passing gives `LANE_FOLLOWING`,
-> and the check failing (the ego left its lane, unexplained) gives `UNKNOWN`. It runs alongside the
-> classifiers, not before them, they run every cycle regardless. Full rule chain:
+> and the check failing (the ego left its lane, unexplained) gives `UNKNOWN`. It runs after the
+> classifiers and after the hold update, so in the cycle where an event ends, it already uses the
+> re-anchored reference lane. The classifiers run every cycle regardless. Full rule chain:
 > [`docs/lane_following.md`](docs/lane_following.md).
 
 ```mermaid
@@ -85,9 +86,10 @@ config:
 flowchart TD
     A[trajectory arrives] --> B{inputs ready?}
     B -->|no| U[publish UNKNOWN]
-    B -->|yes| E[lane-following check: following?]
-    E --> F[run each classifier]
-    F --> G{any classifier<br/>confirmed an event?}
+    B -->|yes| F[run each classifier]
+    F --> R[hold the reference lane while an event runs;<br/>re-anchor it when an event ends]
+    R --> E[lane-following check: following?]
+    E --> G{any classifier<br/>confirmed an event?}
     G -->|yes| H[state = first confirmed classifier]
     G -->|no| I{check says following?}
     I -->|yes| J[state = LANE_FOLLOWING]
@@ -101,7 +103,7 @@ flowchart TD
     classDef output stroke:#f87171,fill:#fef2f2
 
     class B,G,I decision
-    class E,F,H,J,K process
+    class E,F,R,H,J,K process
     class A,U,P output
 ```
 
@@ -111,7 +113,10 @@ The order of resolution:
    `UNKNOWN` counts as "no event".
 2. **First confirmed classifier wins.** Classifiers are checked in a fixed priority order
    (lane change, then intentional crossing).
-3. **No event → fall back to the lane-following check.** If the check says following, the state is
+3. **Hold, then re-anchor.** While an event runs, the reference lane is held. When the last event
+   ends in this cycle, the reference lane is released and re-anchored before the lane-following
+   check, so the end of a change gives `LANE_FOLLOWING` at once, not one cycle of `UNKNOWN`.
+4. **No event → fall back to the lane-following check.** If the check says following, the state is
    `LANE_FOLLOWING`. If the check says the ego departed but no classifier explained it, the state is
    `UNKNOWN`.
 
