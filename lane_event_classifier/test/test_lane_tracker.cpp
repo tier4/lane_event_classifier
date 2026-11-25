@@ -344,6 +344,23 @@ TEST(LaneTrackerTest, distance_to_lane_or_next_counts_next_lanes)
   EXPECT_FALSE(tracker.distance_to_lane_or_next(kUnknownLaneId, {15.0, 4.0}).has_value());
 }
 
+// The departure reset (trigger 2) counts only the next lanes that a held lane may move into. A next
+// lane with turn_direction does not count, so for a point inside it the distance is the distance
+// to the held lane itself: 5 m, from its end at x = 10 to x = 15.
+TEST(LaneTrackerTest, distance_to_lane_or_next_skips_turn_next_lane)
+{
+  lanelet::Id id_a = lanelet::InvalId;
+  lanelet::Id id_b = lanelet::InvalId;
+  auto map = make_next_lane_map(id_a, id_b);
+  map->laneletLayer.get(id_b).attributes()["turn_direction"] = "right";
+  LaneTracker tracker;
+  ASSERT_TRUE(tracker.set_lanelet_map(map).has_value());
+
+  const auto distance = tracker.distance_to_lane_or_next(id_a, {15.0, 0.0});
+  ASSERT_TRUE(distance.has_value());
+  EXPECT_NEAR(*distance, 5.0, 1e-6);
+}
+
 TEST(LaneTrackerTest, lanelet_lookup_helpers)
 {
   lanelet::Id lane_id = lanelet::InvalId;
