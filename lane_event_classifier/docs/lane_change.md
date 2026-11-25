@@ -124,8 +124,9 @@ in the target lane.
 phase returns directly to `LANE_CHANGING` without passing through idle.
 
 There is no timed exit from aborting; it leaves only by one of these three edges. A localization jump
-or the ego straying far from the held reference lane is handled separately, by the node's
-tracking-state reset.
+or the ego straying far from the held reference lane and its next lanes is handled separately, by
+the node's tracking-state reset. The held reference lane moves forward with the ego into a next lane,
+so a change that passes a lanelet seam keeps its reference lane beside the ego.
 
 ## Parameters
 
