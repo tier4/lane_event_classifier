@@ -100,6 +100,21 @@ std::optional<double> LaneTracker::distance_to_lane(
   return lanelet::geometry::distance2d(lane, point);
 }
 
+std::optional<double> LaneTracker::distance_to_lane_or_next(
+  lanelet::Id lane_id, const lanelet::BasicPoint2d & point) const
+{
+  auto nearest_distance = distance_to_lane(lane_id, point);
+  if (!nearest_distance) {
+    return std::nullopt;
+  }
+  for (const auto next_lane_id : next_lane_ids(lane_id)) {
+    if (const auto next_distance = distance_to_lane(next_lane_id, point)) {
+      nearest_distance = std::min(*nearest_distance, *next_distance);
+    }
+  }
+  return nearest_distance;
+}
+
 std::vector<lanelet::Id> LaneTracker::lanelet_ids_at(const lanelet::BasicPoint2d & point) const
 {
   std::vector<lanelet::Id> ids;
@@ -267,7 +282,14 @@ tl::expected<void, std::string> LaneTracker::update(const LaneEventInput & input
   debug_is_last_reanchor_blocked_ = false;
 
   // A held reference lane is normal during an event (README.md, "Holding the reference lane").
+  // It still moves forward with the ego, so an event that passes a lanelet seam keeps a reference
+  // lane beside the ego. A sideways move stays blocked, and the blocked flag stays false.
   if (is_reference_lane_held_) {
+    if (const auto next_lane_id = held_reference_lane_next_id(input)) {
+      if (const auto lane_opt = get_lanelet(*next_lane_id)) {
+        reference_lane_ = set_reference_lane(*lane_opt);
+      }
+    }
     return {};
   }
 
@@ -317,6 +339,27 @@ std::optional<lanelet::Id> LaneTracker::new_reference_lane_id(const LaneEventInp
     return std::nullopt;
   }
 
+  return current_lane_id;
+}
+
+std::optional<lanelet::Id> LaneTracker::held_reference_lane_next_id(
+  const LaneEventInput & input) const
+{
+  const auto current_lane_id = select_current_lane_id(input);
+  const auto held_lane_id = reference_lane_.reference_lane_id;
+  if (
+    !current_lane_id || *current_lane_id == held_lane_id ||
+    !is_lane_directly_connected(held_lane_id, *current_lane_id)) {
+    return std::nullopt;
+  }
+  // apply_reference_lane_hold releases a held intersection or shoulder lane at once, so moving
+  // into one would end the hold in the middle of the event.
+  const auto current_lane = get_lanelet(*current_lane_id);
+  if (
+    !current_lane || lanelet2_utils::is_intersection_lanelet(*current_lane) ||
+    lanelet2_utils::is_shoulder_lane(*current_lane)) {
+    return std::nullopt;
+  }
   return current_lane_id;
 }
 

@@ -161,10 +161,11 @@ tl::expected<void, std::string> LaneEventClassifierNode::check_tracking_state()
     return tl::make_unexpected("reposition jump (step exceeds reported motion)");
   }
 
-  // Trigger 2 — a held reference lane never re-anchors, so reset once the ego strays past it.
+  // Trigger 2 — a held reference lane only moves forward, so reset once the ego strays from it
+  // and its next lanes. The next lanes cover an ego that changed lanes just before a seam.
   if (lane_tracker_.is_reference_lane_held()) {
-    const auto distance_to_reference =
-      lane_tracker_.distance_to_lane(lane_tracker_.reference_lane().reference_lane_id, ego_point);
+    const auto distance_to_reference = lane_tracker_.distance_to_lane_or_next(
+      lane_tracker_.reference_lane().reference_lane_id, ego_point);
     if (distance_to_reference && *distance_to_reference > params_.lane_departure_reset_distance_m) {
       return tl::make_unexpected("ego departed far from the held reference lane");
     }
