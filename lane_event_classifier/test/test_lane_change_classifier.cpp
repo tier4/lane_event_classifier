@@ -134,8 +134,8 @@ std::vector<lanelet::BasicPoint2d> footprint_box(const lanelet::BasicPoint2d & c
     {center.x() - half, center.y() + half}};
 }
 
-// Drives one cycle exactly as the node does: update, lane-following check, classify, then hold or
-// release.
+// Drives one cycle exactly as the node does: update, classify, hold or release (re-anchor when an
+// event ends), then the lane-following check.
 class Simulator
 {
 public:
@@ -151,13 +151,18 @@ public:
   {
     [[maybe_unused]] const auto update_result = tracker_.update(input);
     context_.update(tracker_, input);
-    const auto & ego_position = input.odometry_ptr->pose.pose.position;
-    lane_following_result_ =
-      lane_following_checker_.evaluate(tracker_, context_, {ego_position.x, ego_position.y});
     classifier_.update(input, context_);
     state_ = classifier_.get_state();
     const bool is_active = state_ == DS::LANE_CHANGING || state_ == DS::ABORTING_LANE_CHANGE;
+    const bool was_held = tracker_.is_reference_lane_held();
     tracker_.apply_reference_lane_hold(is_active);
+    if (was_held && !tracker_.is_reference_lane_held()) {
+      [[maybe_unused]] const auto reanchor_result = tracker_.update(input);
+      context_.update(tracker_, input);
+    }
+    const auto & ego_position = input.odometry_ptr->pose.pose.position;
+    lane_following_result_ =
+      lane_following_checker_.evaluate(tracker_, context_, {ego_position.x, ego_position.y});
     return state_;
   }
 
