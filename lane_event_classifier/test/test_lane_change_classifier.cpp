@@ -19,6 +19,7 @@
 #include <autoware/lanelet2_utils/conversion.hpp>
 #include <lane_event_classifier/detail/lane_tracker.hpp>
 #include <lane_event_classifier/lane_change/classifier.hpp>
+#include <lane_event_classifier/lane_following/checker.hpp>
 
 #include <autoware_vehicle_msgs/msg/turn_indicators_report.hpp>
 #include <lane_event_classifier_msgs/msg/driving_state.hpp>
@@ -133,12 +134,14 @@ std::vector<lanelet::BasicPoint2d> footprint_box(const lanelet::BasicPoint2d & c
     {center.x() - half, center.y() + half}};
 }
 
-// Drives one cycle exactly as the node does: update, classify, then hold or release.
+// Drives one cycle exactly as the node does: update, classify, hold or release (re-anchor when an
+// event ends), then the lane-following check.
 class Simulator
 {
 public:
   Simulator(lanelet::LaneletMapPtr map, LaneChangeConfig config)
-  : classifier_{true, config, tracker_, LaneChangeGeometry{config.crossing_look_ahead_m}}
+  : classifier_{true, config, tracker_, LaneChangeGeometry{config.crossing_look_ahead_m}},
+    lane_following_checker_{LaneFollowingConfig{}, LaneFollowingGeometry{LaneFollowingConfig{}}}
   {
     const auto result = tracker_.set_lanelet_map(map);
     EXPECT_TRUE(result.has_value());
@@ -149,10 +152,18 @@ public:
     [[maybe_unused]] const auto update_result = tracker_.update(input);
     context_.update(tracker_, input);
     classifier_.update(input, context_);
-    const auto state = classifier_.get_state();
-    const bool is_active = state == DS::LANE_CHANGING || state == DS::ABORTING_LANE_CHANGE;
+    state_ = classifier_.get_state();
+    const bool is_active = state_ == DS::LANE_CHANGING || state_ == DS::ABORTING_LANE_CHANGE;
+    const bool was_held = tracker_.is_reference_lane_held();
     tracker_.apply_reference_lane_hold(is_active);
-    return state;
+    if (was_held && !tracker_.is_reference_lane_held()) {
+      [[maybe_unused]] const auto reanchor_result = tracker_.update(input);
+      context_.update(tracker_, input);
+    }
+    const auto & ego_position = input.odometry_ptr->pose.pose.position;
+    lane_following_result_ =
+      lane_following_checker_.evaluate(tracker_, context_, {ego_position.x, ego_position.y});
+    return state_;
   }
 
   [[nodiscard]] lanelet::Id reference_lane_id() const
@@ -160,10 +171,25 @@ public:
     return tracker_.reference_lane().reference_lane_id;
   }
 
+  [[nodiscard]] bool is_lane_following() const { return lane_following_result_.is_following; }
+
+  // The state the node publishes for the last cycle: the classifier state when it claims an event,
+  // else LANE_FOLLOWING or, for a departure, UNKNOWN.
+  [[nodiscard]] uint8_t published_state() const
+  {
+    if (state_) {
+      return *state_;
+    }
+    return lane_following_result_.is_following ? DS::LANE_FOLLOWING : DS::UNKNOWN;
+  }
+
 private:
   LaneTracker tracker_;
   LaneEventContext context_;
   LaneChangeClassifier classifier_;
+  LaneFollowingChecker lane_following_checker_;
+  LaneFollowingResult lane_following_result_{};
+  std::optional<uint8_t> state_;
 };
 
 LaneChangeConfig make_config()
@@ -230,6 +256,11 @@ TEST(LaneChangeTest, single_left_change_onset_then_settle)
         route, point_in_47, sec, nsec, settle_trajectory, footprint_47));
     if (!state) {
       settled = true;
+      // The cycle that ends the change already re-anchors to 47, so it publishes LANE_FOLLOWING,
+      // not one cycle of UNKNOWN against the old reference lane 48.
+      EXPECT_EQ(sim.reference_lane_id(), 47);
+      EXPECT_TRUE(sim.is_lane_following());
+      EXPECT_EQ(sim.published_state(), DS::LANE_FOLLOWING);
       break;
     }
   }

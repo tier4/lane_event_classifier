@@ -124,8 +124,10 @@ in the target lane.
 phase returns directly to `LANE_CHANGING` without passing through idle.
 
 There is no timed exit from aborting; it leaves only by one of these three edges. A localization jump
-or the ego straying far from the held reference lane is handled separately, by the node's
-tracking-state reset.
+or the ego straying far from the held reference lane and the next lanes it can move into (not
+intersection or road shoulder lanes) is handled separately, by the node's tracking-state reset. The
+held reference lane moves forward with the ego into a next lane, so a change that passes a lanelet
+seam keeps its reference lane beside the ego.
 
 ## Parameters
 
@@ -135,7 +137,7 @@ Defaults: [`param/lane_event_classifier.param.yaml`](../param/lane_event_classif
 | Name                            | Default | Meaning                                                                                          |
 | ------------------------------- | ------- | ------------------------------------------------------------------------------------------------ |
 | `enable_classifier`             | true    | Turn the lane-change classifier on or off.                                                       |
-| `crossing_look_ahead_m`         | 30.0    | Arc length ahead along the trajectory scanned for a crossing.                                    |
+| `crossing_look_ahead_m`         | 60.0    | Arc length ahead along the trajectory scanned for a crossing.                                    |
 | `crossing_persist_duration_s`   | 0.3     | Seconds a crossing (and an abort return) must persist before it is confirmed.                    |
 | `crossing_position_tolerance_m` | 2.0     | How far the crossing point may move and still count as the same crossing.                        |
 | `confidence_factor`             | 0.3     | Fraction the persistence window shrinks to when a confidence signal is present (0 < factor < 1). |

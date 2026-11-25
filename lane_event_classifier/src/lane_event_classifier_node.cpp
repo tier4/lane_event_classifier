@@ -161,10 +161,12 @@ tl::expected<void, std::string> LaneEventClassifierNode::check_tracking_state()
     return tl::make_unexpected("reposition jump (step exceeds reported motion)");
   }
 
-  // Trigger 2 — a held reference lane never re-anchors, so reset once the ego strays past it.
+  // Trigger 2 — a held reference lane only moves forward, so reset once the ego strays from it
+  // and the next lanes it can move into. The next lanes cover an ego that changed lanes just before
+  // a seam. Intersection and shoulder lanes do not count, as for the forward move.
   if (lane_tracker_.is_reference_lane_held()) {
-    const auto distance_to_reference =
-      lane_tracker_.distance_to_lane(lane_tracker_.reference_lane().reference_lane_id, ego_point);
+    const auto distance_to_reference = lane_tracker_.distance_to_lane_or_next(
+      lane_tracker_.reference_lane().reference_lane_id, ego_point);
     if (distance_to_reference && *distance_to_reference > params_.lane_departure_reset_distance_m) {
       return tl::make_unexpected("ego departed far from the held reference lane");
     }
@@ -225,13 +227,7 @@ void LaneEventClassifierNode::on_trajectory(
     debug_.log_warn(tracker_updated.error());
   }
   context_.update(lane_tracker_, input_);
-  const double lane_tracker_time_ms = stop_watch.toc("lane_tracker");
-
-  const auto & ego_position = input_.odometry_ptr->pose.pose.position;
-  stop_watch.tic("lane_following");
-  const auto lane_following_result =
-    lane_following_checker_.evaluate(lane_tracker_, context_, {ego_position.x, ego_position.y});
-  const double lane_following_time_ms = stop_watch.toc("lane_following");
+  double lane_tracker_time_ms = stop_watch.toc("lane_tracker");
 
   uint8_t current_state_val = DrivingState::LANE_FOLLOWING;
   bool is_any_event_active = false;
@@ -254,6 +250,27 @@ void LaneEventClassifierNode::on_trajectory(
     }
     is_any_event_active = true;
   }
+
+  // Freeze the reference lane while an event runs (README.md, "Holding the reference lane"). When
+  // an event ends in this cycle, re-anchor now, so the lane-following check below already uses the
+  // lane the ego settled in, not the released one.
+  const bool was_reference_lane_held = lane_tracker_.is_reference_lane_held();
+  lane_tracker_.apply_reference_lane_hold(is_any_event_active);
+  if (was_reference_lane_held && !lane_tracker_.is_reference_lane_held()) {
+    stop_watch.tic("lane_tracker_reanchor");
+    if (const auto tracker_updated = lane_tracker_.update(input_); !tracker_updated) {
+      debug_.log_warn(tracker_updated.error());
+    }
+    context_.update(lane_tracker_, input_);
+    lane_tracker_time_ms += stop_watch.toc("lane_tracker_reanchor");
+  }
+
+  const auto & ego_position = input_.odometry_ptr->pose.pose.position;
+  stop_watch.tic("lane_following");
+  const auto lane_following_result =
+    lane_following_checker_.evaluate(lane_tracker_, context_, {ego_position.x, ego_position.y});
+  const double lane_following_time_ms = stop_watch.toc("lane_following");
+
   // No confirmed event: fall back to the lane-following check; a departure is then UNKNOWN.
   if (!is_any_event_active && !lane_following_result.is_following) {
     current_state_val = DrivingState::UNKNOWN;
@@ -263,9 +280,6 @@ void LaneEventClassifierNode::on_trajectory(
 
   out.driving_state.state = current_state_val;
   pub_driving_factor_->publish(out);
-
-  // Freeze the reference lane while an event runs (README.md, "Holding the reference lane").
-  lane_tracker_.apply_reference_lane_hold(is_any_event_active);
 
   const double total_time_ms = stop_watch.toc();
 

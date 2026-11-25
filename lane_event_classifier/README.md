@@ -24,10 +24,10 @@ and for how long.
 These terms are shared across the classifiers. Each classifier's own doc links here on first use and
 defines only the terms specific to it.
 
-| Term            | Meaning                                                                                                                                                                                      |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Reference lane  | The lane the tracker is holding for the ego this cycle. Locked while an event runs, released and re-anchored to the ego's current lane when the event ends.                                  |
-| Route primitive | A preferred lane of the current route, one of the planned-path lanes the ego drives on a best-effort basis. So "is this lane a route primitive?" asks whether the lane is part of that path. |
+| Term            | Meaning                                                                                                                                                                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reference lane  | The lane the tracker is holding for the ego this cycle. Held while an event runs: it then only moves forward into a next lane (never into an intersection or road shoulder lane), and it is released and re-anchored to the ego's current lane when the event ends. |
+| Route primitive | A preferred lane of the current route, one of the planned-path lanes the ego drives on a best-effort basis. So "is this lane a route primitive?" asks whether the lane is part of that path.                                                                        |
 
 ---
 
@@ -73,8 +73,9 @@ published.
 > **The lane-following check.** `LaneFollowingChecker` answers one yes/no question: _is the ego
 > still inside the lane it is supposed to be following?_ Its result is
 > the **default label**: when no classifier claims an event, the check passing gives `LANE_FOLLOWING`,
-> and the check failing (the ego left its lane, unexplained) gives `UNKNOWN`. It runs alongside the
-> classifiers, not before them, they run every cycle regardless. Full rule chain:
+> and the check failing (the ego left its lane, unexplained) gives `UNKNOWN`. It runs after the
+> classifiers and after the hold update, so in the cycle where an event ends, it already uses the
+> re-anchored reference lane. The classifiers run every cycle regardless. Full rule chain:
 > [`docs/lane_following.md`](docs/lane_following.md).
 
 ```mermaid
@@ -85,9 +86,10 @@ config:
 flowchart TD
     A[trajectory arrives] --> B{inputs ready?}
     B -->|no| U[publish UNKNOWN]
-    B -->|yes| E[lane-following check: following?]
-    E --> F[run each classifier]
-    F --> G{any classifier<br/>confirmed an event?}
+    B -->|yes| F[run each classifier]
+    F --> R[hold the reference lane while an event runs;<br/>re-anchor it when an event ends]
+    R --> E[lane-following check: following?]
+    E --> G{any classifier<br/>confirmed an event?}
     G -->|yes| H[state = first confirmed classifier]
     G -->|no| I{check says following?}
     I -->|yes| J[state = LANE_FOLLOWING]
@@ -101,7 +103,7 @@ flowchart TD
     classDef output stroke:#f87171,fill:#fef2f2
 
     class B,G,I decision
-    class E,F,H,J,K process
+    class E,F,R,H,J,K process
     class A,U,P output
 ```
 
@@ -111,7 +113,10 @@ The order of resolution:
    `UNKNOWN` counts as "no event".
 2. **First confirmed classifier wins.** Classifiers are checked in a fixed priority order
    (lane change, then intentional crossing).
-3. **No event → fall back to the lane-following check.** If the check says following, the state is
+3. **Hold, then re-anchor.** While an event runs, the reference lane is held. When the last event
+   ends in this cycle, the reference lane is released and re-anchored before the lane-following
+   check, so the end of a change gives `LANE_FOLLOWING` at once, not one cycle of `UNKNOWN`.
+4. **No event → fall back to the lane-following check.** If the check says following, the state is
    `LANE_FOLLOWING`. If the check says the ego departed but no classifier explained it, the state is
    `UNKNOWN`.
 
@@ -154,7 +159,7 @@ Defaults: [`param/lane_event_classifier.param.yaml`](param/lane_event_classifier
 | Name                              | Meaning                                                                                                                                                                                                                                                                                                                      |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `reposition_jump_margin_m`        | Localization-noise margin added to the speed-explained step (`speed · dt`, taking the faster of this cycle's and the previous cycle's speed so braking does not shrink the budget); a per-cycle ego step beyond that is treated as a reposition jump and resets the tracking state.                                          |
-| `lane_departure_reset_distance_m` | While the reference lane is held, distance from the ego to that lane above which the tracking state is reset (countermeasure for a manual takeover).                                                                                                                                                                         |
+| `lane_departure_reset_distance_m` | While the reference lane is held, distance from the ego to that lane and the next lanes it can move into (not intersection or road shoulder lanes) above which the tracking state is reset (countermeasure for a manual takeover).                                                                                                                                                      |
 | `stuck_reanchor_reset_duration_s` | While the reference lane is not held, seconds the ego must stay both unreachable-forward from it and beyond `lane_departure_reset_distance_m` before the tracking state is reset (the tracker only re-anchors on forward progress, so an unheld reference lane the ego never returns to would otherwise stay stuck forever). |
 
 Lane-following check parameters (`lane_following.*`) are documented in [`docs/lane_following.md`](docs/lane_following.md#parameters).

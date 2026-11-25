@@ -61,7 +61,8 @@ public:
   }
 
   /**
-   * @brief Refreshes the reference lane for this cycle (unless held).
+   * @brief Refreshes the reference lane for this cycle. A held reference lane only moves forward
+   * into a next lane that is neither an intersection nor a road shoulder lane.
    * @param input Per-cycle subscribed inputs and footprint.
    */
   tl::expected<void, std::string> update(const LaneEventInput & input);
@@ -101,6 +102,17 @@ public:
   [[nodiscard]] std::optional<double> distance_to_lane(
     lanelet::Id lane_id, const lanelet::BasicPoint2d & point) const;
 
+  /**
+   * @brief 2D distance from the point to the lane or to the nearest of its next lanes that a held
+   * reference lane can move into, so not an intersection or a road shoulder lane (0 while inside
+   * one of them).
+   * @param lane_id Lanelet id to measure against, together with those next lanes.
+   * @param point Query point in the map frame.
+   * @return The distance in metres, or nullopt if the lane id is unknown.
+   */
+  [[nodiscard]] std::optional<double> distance_to_lane_or_next(
+    lanelet::Id lane_id, const lanelet::BasicPoint2d & point) const;
+
   /** @brief Ids of every lanelet that contains the given point. */
   [[nodiscard]] std::vector<lanelet::Id> lanelet_ids_at(const lanelet::BasicPoint2d & point) const;
 
@@ -137,6 +149,13 @@ private:
 
   /** @brief Re-anchors the reference lane only on forward progress into a next lane. */
   std::optional<lanelet::Id> new_reference_lane_id(const LaneEventInput & input) const;
+
+  /**
+   * @brief The next lane a held reference lane moves into: the ego's current lane when it is a
+   * next lane of the held lane and neither an intersection nor a road shoulder lane.
+   */
+  [[nodiscard]] std::optional<lanelet::Id> held_reference_lane_next_id(
+    const LaneEventInput & input) const;
 
   /** @brief Anchors the reference lane onto the given lane and resolves its attribute flags. */
   ReferenceLane set_reference_lane(const lanelet::ConstLanelet & new_reference_lane) const;
