@@ -24,10 +24,10 @@ and for how long.
 These terms are shared across the classifiers. Each classifier's own doc links here on first use and
 defines only the terms specific to it.
 
-| Term            | Meaning                                                                                                                                                                                      |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Reference lane  | The lane the tracker is holding for the ego this cycle. Held while an event runs: it then only moves forward into a next lane (never into an intersection or road shoulder lane), and it is released and re-anchored to the ego's current lane when the event ends.                                  |
-| Route primitive | A preferred lane of the current route, one of the planned-path lanes the ego drives on a best-effort basis. So "is this lane a route primitive?" asks whether the lane is part of that path. |
+| Term            | Meaning                                                                                                                                                                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reference lane  | The lane the tracker is holding for the ego this cycle. Held while an event runs: it then only moves forward into a next lane (never into an intersection or road shoulder lane), and it is released and re-anchored to the ego's current lane when the event ends. |
+| Route primitive | A preferred lane of the current route, one of the planned-path lanes the ego drives on a best-effort basis. So "is this lane a route primitive?" asks whether the lane is part of that path.                                                                        |
 
 ---
 
@@ -154,7 +154,7 @@ Defaults: [`param/lane_event_classifier.param.yaml`](param/lane_event_classifier
 | Name                              | Meaning                                                                                                                                                                                                                                                                                                                      |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `reposition_jump_margin_m`        | Localization-noise margin added to the speed-explained step (`speed · dt`, taking the faster of this cycle's and the previous cycle's speed so braking does not shrink the budget); a per-cycle ego step beyond that is treated as a reposition jump and resets the tracking state.                                          |
-| `lane_departure_reset_distance_m` | While the reference lane is held, distance from the ego to that lane and its next lanes above which the tracking state is reset (countermeasure for a manual takeover).                                                                                                                                                                         |
+| `lane_departure_reset_distance_m` | While the reference lane is held, distance from the ego to that lane and its next lanes above which the tracking state is reset (countermeasure for a manual takeover).                                                                                                                                                      |
 | `stuck_reanchor_reset_duration_s` | While the reference lane is not held, seconds the ego must stay both unreachable-forward from it and beyond `lane_departure_reset_distance_m` before the tracking state is reset (the tracker only re-anchors on forward progress, so an unheld reference lane the ego never returns to would otherwise stay stuck forever). |
 
 Lane-following check parameters (`lane_following.*`) are documented in [`docs/lane_following.md`](docs/lane_following.md#parameters).
