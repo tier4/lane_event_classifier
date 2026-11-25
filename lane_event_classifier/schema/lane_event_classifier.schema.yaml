@@ -65,7 +65,7 @@ lane_event_classifier:
         gt<>: [0.0]
     crossing_look_ahead_m:
       type: double
-      default_value: 30.0
+      default_value: 60.0
       description: Arc length ahead along the trajectory scanned for a lane-change crossing
       validation:
         gt<>: [0.0]
