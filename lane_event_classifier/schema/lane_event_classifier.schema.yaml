@@ -83,6 +83,12 @@ lane_event_classifier:
       # floating_point_range entries, overflowing ParameterDescriptor's size-1 bounded vector.
       validation:
         bounds<>: [0.0, 1.0]
+    bypass_max_crossing_angle_deg:
+      type: double
+      default_value: 30.0
+      description: Maximum angle between the centerline of a bypass branch and the painted line of the other successor that it crosses, for the bypass crossing to start a lane change (PDDP-886)
+      validation:
+        bounds<>: [0.0, 90.0]
   lane_crossing:
     enable_classifier:
       type: bool

@@ -17,6 +17,7 @@
       crossing_look_ahead_m: 60.0
       crossing_position_tolerance_m: 2.0
       confidence_factor: 0.3
+      bypass_max_crossing_angle_deg: 30.0
     lane_crossing:
       enable_classifier: true
       crossing_look_ahead_m: 30.0

@@ -71,6 +71,26 @@ forward until the arc length reaches `crossing_look_ahead_m`, and looks for the 
    traversed to get there — is the target lane, so the target is always a lane the settle check can
    confirm.
 
+### Bypass branch
+
+A route can leave the reference lane through a branch lanelet that moves across a painted lane line.
+The route lanelets connect as successors there, so the straight-on-route skip ends the walk above.
+For this reason, the bypass check runs first, before the straight-on-route skip.
+
+A bypass crossing needs all of these:
+
+1. The reference lane has two or more successors.
+2. One successor, the branch, is a route primitive and has at least one virtual bound.
+3. Another successor is not a road shoulder. It, or one of its successors that starts within the
+   length of the branch, has a bound that is not virtual. That bound is the crossed line.
+4. The centerline of the branch crosses that line at less than `bypass_max_crossing_angle_deg`.
+   The angle uses the directions of both lines over 1 m before and after the crossing point.
+
+The crossing point is the first point where the forward trajectory crosses a crossed line. The
+target lane is the branch. The side is the side of the crossed line: the left bound of its lane
+gives a change to the left, and the right bound a change to the right. The exemptions below do not
+apply to a bypass crossing. A branch often has `turn_direction` so that the turn signal comes on.
+
 ### Exemptions
 
 A found crossing is dropped when any of these hold:
@@ -141,6 +161,7 @@ Defaults: [`param/lane_event_classifier.param.yaml`](../param/lane_event_classif
 | `crossing_persist_duration_s`   | 0.3     | Seconds a crossing (and an abort return) must persist before it is confirmed.                    |
 | `crossing_position_tolerance_m` | 2.0     | How far the crossing point may move and still count as the same crossing.                        |
 | `confidence_factor`             | 0.3     | Fraction the persistence window shrinks to when a confidence signal is present (0 < factor < 1). |
+| `bypass_max_crossing_angle_deg` | 30.0    | Largest angle between a bypass branch and the painted line it crosses (see Bypass branch).       |
 | `settle_confirm_duration_s`     | 0.7     | Seconds the footprint must stay fully inside the target route primitive to confirm a completion. |
 
 ## Design notes
