@@ -165,10 +165,16 @@ tl::expected<void, std::string> LaneEventClassifierNode::check_tracking_state()
 
   // Trigger 2 — a held reference lane only moves forward, so reset once the ego strays from it
   // and the next lanes it can move into. The next lanes cover an ego that changed lanes just before
-  // a seam. Intersection and shoulder lanes do not count, as for the forward move.
+  // a seam. Intersection and shoulder lanes do not count, as for the forward move. An active event
+  // can add lanes, for example the bypass branch of a lane change.
   if (lane_tracker_.is_reference_lane_held()) {
-    const auto distance_to_reference = lane_tracker_.distance_to_lane_or_next(
-      lane_tracker_.reference_lane().reference_lane_id, ego_point);
+    std::vector<lanelet::Id> extra_lane_ids;
+    for (const auto & classifier : classifiers_) {
+      const auto lane_ids = classifier->departure_reset_lane_ids();
+      extra_lane_ids.insert(extra_lane_ids.end(), lane_ids.begin(), lane_ids.end());
+    }
+    const auto distance_to_reference =
+      departure_distance_m(lane_tracker_, extra_lane_ids, ego_point);
     if (distance_to_reference && *distance_to_reference > params_.lane_departure_reset_distance_m) {
       return tl::make_unexpected("ego departed far from the held reference lane");
     }

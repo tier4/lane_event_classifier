@@ -151,12 +151,12 @@ public:
   std::optional<uint8_t> step(const LaneEventInput & input)
   {
     // Mirrors trigger 2 of the node's check_tracking_state: a held lane resets once base_link is
-    // more than lane_departure_reset_distance_m (5 m) from it and the next lanes it can move into.
-    // The Simulator only counts the resets.
+    // more than lane_departure_reset_distance_m (5 m) from it, the next lanes it can move into, and
+    // the lanes of an active event. The Simulator only counts the resets.
     const auto & position = input.odometry_ptr->pose.pose.position;
     if (tracker_.is_reference_lane_held()) {
-      const auto distance = tracker_.distance_to_lane_or_next(
-        tracker_.reference_lane().reference_lane_id, {position.x, position.y});
+      const auto distance = departure_distance_m(
+        tracker_, classifier_.departure_reset_lane_ids(), {position.x, position.y});
       if (distance && *distance > departure_reset_distance_m) {
         ++departure_reset_count_;
       }

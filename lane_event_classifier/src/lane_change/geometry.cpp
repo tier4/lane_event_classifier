@@ -407,6 +407,10 @@ bool LaneChangeGeometry::is_footprint_clear_of_lanes(
   const std::vector<lanelet::Id> & lane_ids)
 {
   // Bypass end (docs/lane_change.md, "Bypass branch"): the whole body is past the crossed lines.
+  // An empty footprint is not clear, the same as for the off-route confidence signal.
+  if (input.footprint.empty()) {
+    return false;
+  }
   return std::none_of(
     input.footprint.cbegin(), input.footprint.cend(), [&](const lanelet::BasicPoint2d & point) {
       const auto ids_at_point = tracker.lanelet_ids_at(point);

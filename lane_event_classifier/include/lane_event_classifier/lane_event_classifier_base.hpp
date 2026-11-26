@@ -18,9 +18,12 @@
 #include <lane_event_classifier/detail/lane_event_context.hpp>
 #include <lane_event_classifier/types.hpp>
 
+#include <lanelet2_core/Forward.h>
+
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace lane_event_classifier
 {
@@ -55,6 +58,12 @@ public:
 
   /** @brief One-line reason for the most recent state transition (debug/logging only). */
   [[nodiscard]] virtual std::string debug_reason() const { return {}; }
+
+  /**
+   * @brief Lanes that the departure reset also counts while this classifier's event is active,
+   * for example the bypass branch of a lane change (docs/lane_change.md, "Bypass branch").
+   */
+  [[nodiscard]] virtual std::vector<lanelet::Id> departure_reset_lane_ids() const { return {}; }
 };
 
 }  // namespace lane_event_classifier

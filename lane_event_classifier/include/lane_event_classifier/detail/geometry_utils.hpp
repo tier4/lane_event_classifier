@@ -150,6 +150,29 @@ inline bool is_stuck_and_far_from_reference(
          *distance_to_reference_m > reset_distance_m;
 }
 
+/**
+ * @brief Distance from the point to the held reference lane, the next lanes it can move into, and
+ * the extra lanes of an active event (LaneEventClassifierBase::departure_reset_lane_ids); nullopt
+ * when the held lane cannot be measured. Trigger 2 of the node resets the tracking state once it
+ * exceeds lane_departure_reset_distance_m.
+ */
+inline std::optional<double> departure_distance_m(
+  const LaneTracker & tracker, const std::vector<lanelet::Id> & extra_lane_ids,
+  const lanelet::BasicPoint2d & point)
+{
+  auto distance =
+    tracker.distance_to_lane_or_next(tracker.reference_lane().reference_lane_id, point);
+  if (!distance) {
+    return std::nullopt;
+  }
+  for (const auto lane_id : extra_lane_ids) {
+    if (const auto extra_distance = tracker.distance_to_lane(lane_id, point)) {
+      distance = std::min(*distance, *extra_distance);
+    }
+  }
+  return distance;
+}
+
 /** @brief True when the reference lane is a route primitive whose straight successor is also a
  * route primitive, so going straight stays on-route.
  * @param reference_lane_id Lane id to test.

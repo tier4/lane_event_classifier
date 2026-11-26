@@ -17,8 +17,10 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace lane_event_classifier
 {
@@ -198,6 +200,33 @@ std::optional<uint8_t> LaneChangeClassifier::get_state() const
       // No lane-change event; the node falls back to the lane-following check.
       return std::nullopt;
   }
+}
+
+std::vector<lanelet::Id> LaneChangeClassifier::departure_reset_lane_ids() const
+{
+  // Bypass branch (docs/lane_change.md, "Bypass branch"): the held lane can stay on the origin
+  // lane while the ego drives through the branch, so the reset also counts the branch and the
+  // route lanes after it (two lanes deep).
+  if (!active_bypass_) {
+    return {};
+  }
+  std::vector<lanelet::Id> lane_ids{active_bypass_->branch_lane_id};
+  std::vector<lanelet::Id> frontier{active_bypass_->branch_lane_id};
+  for (int depth = 0; depth < 2; ++depth) {
+    std::vector<lanelet::Id> next_frontier;
+    for (const auto lane_id : frontier) {
+      for (const auto next_lane_id : tracker_.next_lane_ids(lane_id)) {
+        const bool is_new =
+          std::find(lane_ids.cbegin(), lane_ids.cend(), next_lane_id) == lane_ids.cend();
+        if (is_new && tracker_.is_route_primitive(next_lane_id)) {
+          lane_ids.push_back(next_lane_id);
+          next_frontier.push_back(next_lane_id);
+        }
+      }
+    }
+    frontier = std::move(next_frontier);
+  }
+  return lane_ids;
 }
 
 bool LaneChangeClassifier::is_enabled() const

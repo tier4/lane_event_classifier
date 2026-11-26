@@ -42,6 +42,9 @@ public:
   [[nodiscard]] std::string name() const final { return "lane_change"; }
   [[nodiscard]] std::string debug_reason() const final { return debug_reason_; }
 
+  /** @brief During a bypass event: the branch and the route lanes after it, else empty. */
+  [[nodiscard]] std::vector<lanelet::Id> departure_reset_lane_ids() const final;
+
 private:
   /** @brief Internal maneuver phase; maps to the reported DrivingState. */
   enum class Phase : uint8_t { idle, changing, aborting };
