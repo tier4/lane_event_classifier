@@ -69,6 +69,15 @@ private:
   /** @brief Clears all persistence timers on a phase transition. */
   void reset_timers();
 
+  /**
+   * @brief True when the event has settled this cycle: the bypass end for a bypass event
+   * (docs/lane_change.md, "Bypass branch"), else the footprint fully inside a target route
+   * primitive. Sets the debug reason on a settle.
+   * @param reason_prefix "settle" or "settle from aborting", for the debug reason.
+   */
+  [[nodiscard]] bool has_settled(
+    const LaneChangeObservation & observation, double now_s, const std::string & reason_prefix);
+
   bool enabled_{false};
   LaneChangeConfig config_;
   const LaneTracker & tracker_;  // generic lane queries (owned by the node)
@@ -85,6 +94,12 @@ private:
 
   // Abort persistence (trajectory heads back into the reference lane).
   DebouncedSignal<bool> abort_signal_;
+
+  // Bypass end persistence (no footprint point inside a covered lane of the bypass event).
+  DebouncedSignal<bool> bypass_clear_signal_;
+
+  // The lanes stored at the onset of a bypass event; nullopt for a normal lane change.
+  std::optional<BypassLanes> active_bypass_;
 };
 
 }  // namespace lane_event_classifier

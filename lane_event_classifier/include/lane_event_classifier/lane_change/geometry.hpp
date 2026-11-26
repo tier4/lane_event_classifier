@@ -27,12 +27,22 @@
 namespace lane_event_classifier
 {
 
+/** @brief The lanes of a bypass branch, stored at the onset (docs/lane_change.md, "Bypass branch").
+ */
+struct BypassLanes
+{
+  lanelet::Id origin_lane_id{lanelet::InvalId};  // R: the reference lane before the split
+  lanelet::Id branch_lane_id{lanelet::InvalId};  // B: the route branch
+  std::vector<lanelet::Id> covered_lane_ids;     // R, S, and the successors of S that B crosses
+};
+
 /** @brief Where the planned trajectory first crosses the reference lane's lateral boundary. */
 struct LaneChangeCrossing
 {
   lanelet::Id target_lane_id{lanelet::InvalId};  // first adjacent lane the trajectory crosses into
   lanelet::BasicPoint2d crossing_point{0.0, 0.0};  // where the trajectory exits the reference lane
-  bool is_to_left{false};  // crossing is toward the reference lane's left side
+  bool is_to_left{false};             // crossing is toward the reference lane's left side
+  std::optional<BypassLanes> bypass;  // set for a bypass crossing, else nullopt
 };
 
 /** @brief Per-cycle lane-change geometry the classifier reasons over. */
@@ -48,6 +58,8 @@ struct LaneChangeObservation
   bool is_footprint_inside_reference_lane{false};
   // Settle: a route primitive other than the reference lane the footprint is fully inside.
   std::optional<lanelet::Id> settle_lane_id;
+  // Bypass end: no footprint point is inside a covered lane of the active bypass event.
+  bool is_footprint_clear_of_bypass_lanes{false};
 };
 
 /** @brief Computes the per-cycle lane-change observation from a LaneTracker's queries. */
@@ -61,10 +73,14 @@ public:
    */
   LaneChangeGeometry(double crossing_look_ahead_m, double bypass_max_crossing_angle_deg);
 
-  /** @brief Builds the observation for this cycle from the tracker's (already refreshed) state. */
+  /**
+   * @brief Builds the observation for this cycle from the tracker's (already refreshed) state.
+   * @param active_bypass The lanes stored at the onset of an active bypass event, else nullopt.
+   * The abort tests then use the stored origin lane, not the current reference lane.
+   */
   [[nodiscard]] LaneChangeObservation observe(
-    const LaneTracker & tracker, const LaneEventInput & input,
-    const LaneEventContext & context) const;
+    const LaneTracker & tracker, const LaneEventInput & input, const LaneEventContext & context,
+    const std::optional<BypassLanes> & active_bypass) const;
 
 private:
   /** @brief The valid lane-change crossing of the trajectory over the reference boundary, if any.
@@ -80,12 +96,18 @@ private:
     const LaneTracker & tracker,
     const std::vector<lanelet::BasicPoint2d> & trajectory_points) const;
 
-  /** @brief True when the trajectory heads back into the reference lane (abort observation).
+  /** @brief True when the trajectory heads back into the origin lane (abort observation).
+   * @param origin_lane_id The reference lane, or the stored origin lane of a bypass event.
    * @param has_forward_crossing Whether a valid forward crossing was found this cycle.
    * @param trajectory_points Forward trajectory samples (computed once per cycle by observe). */
   [[nodiscard]] static bool compute_trajectory_returns_to_reference(
-    const LaneTracker & tracker, bool has_forward_crossing,
+    const LaneTracker & tracker, lanelet::Id origin_lane_id, bool has_forward_crossing,
     const std::vector<lanelet::BasicPoint2d> & trajectory_points);
+
+  /** @brief True when no footprint point is inside a covered lane of the bypass event. */
+  [[nodiscard]] static bool is_footprint_clear_of_lanes(
+    const LaneTracker & tracker, const LaneEventInput & input,
+    const std::vector<lanelet::Id> & lane_ids);
 
   /** @brief True when no footprint corner lies inside any route-preferred primitive (the off-route
    * confidence signal).

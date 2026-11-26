@@ -125,6 +125,7 @@ struct BypassLine
   lanelet::Id branch_lane_id{lanelet::InvalId};
   lanelet::ConstLineString2d line;
   bool is_to_left{false};  // the line is the left bound of its lane, so the crossing is to the left
+  std::vector<lanelet::Id> other_lane_ids;  // S and its successors within the length of B
 };
 
 // The bypass lines of the reference lane (docs/lane_change.md, "Bypass branch"): a successor B on
@@ -154,7 +155,13 @@ std::vector<BypassLine> find_bypass_lines(
       if (other_lane_id == branch_lane_id) {
         continue;
       }
-      for (const auto & owner : lanes_within(tracker, other_lane_id, branch_length_m)) {
+      const auto other_lanes = lanes_within(tracker, other_lane_id, branch_length_m);
+      std::vector<lanelet::Id> other_lane_ids;
+      other_lane_ids.reserve(other_lanes.size());
+      for (const auto & other_lane : other_lanes) {
+        other_lane_ids.push_back(other_lane.id());
+      }
+      for (const auto & owner : other_lanes) {
         if (lanelet2_utils::is_shoulder_lane(owner)) {
           continue;
         }
@@ -173,7 +180,7 @@ std::vector<BypassLine> find_bypass_lines(
             direction_near(branch_centerline, hit, angle_window_m),
             direction_near(bound, hit, angle_window_m));
           if (angle_deg < max_angle_deg) {
-            bypass_lines.push_back({branch_lane_id, bound, is_left});
+            bypass_lines.push_back({branch_lane_id, bound, is_left, other_lane_ids});
           }
         }
       }
@@ -231,7 +238,8 @@ LaneChangeGeometry::LaneChangeGeometry(
 }
 
 LaneChangeObservation LaneChangeGeometry::observe(
-  const LaneTracker & tracker, const LaneEventInput & input, const LaneEventContext & context) const
+  const LaneTracker & tracker, const LaneEventInput & input, const LaneEventContext & context,
+  const std::optional<BypassLanes> & active_bypass) const
 {
   // Compute the two per-cycle intermediates once and share them across the helpers below.
   const auto trajectory_points =
@@ -240,13 +248,19 @@ LaneChangeObservation LaneChangeGeometry::observe(
 
   LaneChangeObservation observation;
   observation.crossing = compute_crossing(tracker, input, context, trajectory_points);
+  // A bypass event tests the abort against the stored origin lane (docs/lane_change.md, "Bypass
+  // branch"): the held lane can move into the branch when the branch has no turn_direction.
+  const auto origin_lane_id =
+    active_bypass ? active_bypass->origin_lane_id : tracker.reference_lane().reference_lane_id;
   observation.trajectory_returns_to_reference = compute_trajectory_returns_to_reference(
-    tracker, observation.crossing.has_value(), trajectory_points);
+    tracker, origin_lane_id, observation.crossing.has_value(), trajectory_points);
   observation.is_footprint_off_route_primitives =
     is_footprint_off_route_primitives(tracker, input, footprint_ids);
-  observation.is_footprint_inside_reference_lane = tracker.is_footprint_fully_inside_lane(
-    tracker.reference_lane().reference_lane_id, input.footprint);
+  observation.is_footprint_inside_reference_lane =
+    tracker.is_footprint_fully_inside_lane(origin_lane_id, input.footprint);
   observation.settle_lane_id = compute_settle_lane_id(tracker, input, footprint_ids);
+  observation.is_footprint_clear_of_bypass_lanes =
+    active_bypass && is_footprint_clear_of_lanes(tracker, input, active_bypass->covered_lane_ids);
   return observation;
 }
 
@@ -344,28 +358,62 @@ std::optional<LaneChangeCrossing> LaneChangeGeometry::compute_bypass_crossing(
       const double arc_m = arc_length_at(trajectory_points, point);
       if (arc_m < first_arc_m) {
         first_arc_m = arc_m;
-        first_crossing =
-          LaneChangeCrossing{bypass_line.branch_lane_id, point, bypass_line.is_to_left};
+        first_crossing = LaneChangeCrossing{
+          bypass_line.branch_lane_id, point, bypass_line.is_to_left, std::nullopt};
       }
     }
   }
+  if (!first_crossing) {
+    return std::nullopt;
+  }
+  // The end waits for R and every lane whose line the branch crosses (several lines can match).
+  BypassLanes bypass_lanes;
+  bypass_lanes.origin_lane_id = tracker.reference_lane().reference_lane_id;
+  bypass_lanes.branch_lane_id = first_crossing->target_lane_id;
+  bypass_lanes.covered_lane_ids.push_back(bypass_lanes.origin_lane_id);
+  for (const auto & bypass_line : bypass_lines) {
+    if (bypass_line.branch_lane_id != bypass_lanes.branch_lane_id) {
+      continue;
+    }
+    for (const auto lane_id : bypass_line.other_lane_ids) {
+      const auto & covered = bypass_lanes.covered_lane_ids;
+      if (std::find(covered.cbegin(), covered.cend(), lane_id) == covered.cend()) {
+        bypass_lanes.covered_lane_ids.push_back(lane_id);
+      }
+    }
+  }
+  first_crossing->bypass = std::move(bypass_lanes);
   return first_crossing;
 }
 
 bool LaneChangeGeometry::compute_trajectory_returns_to_reference(
-  const LaneTracker & tracker, bool has_forward_crossing,
+  const LaneTracker & tracker, lanelet::Id origin_lane_id, bool has_forward_crossing,
   const std::vector<lanelet::BasicPoint2d> & trajectory_points)
 {
   // A forward crossing means the trajectory is still heading out, not back.
   if (has_forward_crossing || trajectory_points.empty()) {
     return false;
   }
-  const auto reference_lane_opt = tracker.get_lanelet(tracker.reference_lane().reference_lane_id);
+  const auto reference_lane_opt = tracker.get_lanelet(origin_lane_id);
   if (!reference_lane_opt) {
     return false;
   }
   // The far look-ahead point is back inside the reference lane.
   return lanelet::geometry::inside(*reference_lane_opt, trajectory_points.back());
+}
+
+bool LaneChangeGeometry::is_footprint_clear_of_lanes(
+  const LaneTracker & tracker, const LaneEventInput & input,
+  const std::vector<lanelet::Id> & lane_ids)
+{
+  // Bypass end (docs/lane_change.md, "Bypass branch"): the whole body is past the crossed lines.
+  return std::none_of(
+    input.footprint.cbegin(), input.footprint.cend(), [&](const lanelet::BasicPoint2d & point) {
+      const auto ids_at_point = tracker.lanelet_ids_at(point);
+      return std::any_of(ids_at_point.cbegin(), ids_at_point.cend(), [&](const lanelet::Id id) {
+        return std::find(lane_ids.cbegin(), lane_ids.cend(), id) != lane_ids.cend();
+      });
+    });
 }
 
 bool LaneChangeGeometry::is_footprint_off_route_primitives(

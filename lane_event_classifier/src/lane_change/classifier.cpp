@@ -34,6 +34,35 @@ void LaneChangeClassifier::reset_timers()
   crossing_signal_.reset();
   settle_signal_.reset();
   abort_signal_.reset();
+  bypass_clear_signal_.reset();
+}
+
+bool LaneChangeClassifier::has_settled(
+  const LaneChangeObservation & observation, double now_s, const std::string & reason_prefix)
+{
+  // Bypass end (docs/lane_change.md, "Bypass branch"): replaces the settle, because the footprint
+  // can be fully inside the branch while the body still covers the crossed line.
+  if (active_bypass_) {
+    if (!persists(
+          bypass_clear_signal_, observation.is_footprint_clear_of_bypass_lanes, now_s,
+          config_.settle_confirm_duration_s)) {
+      return false;
+    }
+    debug_reason_ = fmt::format(
+      "{}: footprint left the lanes before bypass branch {}", reason_prefix,
+      active_bypass_->branch_lane_id);
+    return true;
+  }
+  const auto same_lane = [](lanelet::Id tracked, lanelet::Id current) {
+    return tracked == current;
+  };
+  if (!settle_signal_.update(
+        observation.settle_lane_id, now_s, config_.settle_confirm_duration_s, same_lane)) {
+    return false;
+  }
+  debug_reason_ = fmt::format(
+    "{}: footprint fully inside route primitive {}", reason_prefix, *settle_signal_.tracked());
+  return true;
 }
 
 bool LaneChangeClassifier::accumulate_crossing(
@@ -65,7 +94,8 @@ bool LaneChangeClassifier::has_confidence_signal(
 void LaneChangeClassifier::update(const LaneEventInput & input, const LaneEventContext & context)
 {
   const double now_s = stamp_to_seconds(input);
-  const LaneChangeObservation observation = geometry_.observe(tracker_, input, context);
+  const LaneChangeObservation observation =
+    geometry_.observe(tracker_, input, context, active_bypass_);
 
   switch (phase_) {
     case Phase::idle:
@@ -92,6 +122,8 @@ void LaneChangeClassifier::detect_onset(
     debug_reason_ = fmt::format(
       "onset: trajectory crossing to lane {} persisted",
       crossing_signal_.tracked()->target_lane_id);
+    // A bypass event stores its lanes at the onset (docs/lane_change.md, "Bypass branch").
+    active_bypass_ = crossing_signal_.tracked()->bypass;
     phase_ = Phase::changing;
     reset_timers();
   }
@@ -101,15 +133,10 @@ void LaneChangeClassifier::detect_completion_or_abort(
   const LaneChangeObservation & observation, double now_s)
 {
   // Completion (docs/lane_change.md, "Finishing or aborting"): footprint settled in the target.
-  const auto same_lane = [](lanelet::Id tracked, lanelet::Id current) {
-    return tracked == current;
-  };
-  if (settle_signal_.update(
-        observation.settle_lane_id, now_s, config_.settle_confirm_duration_s, same_lane)) {
-    debug_reason_ =
-      fmt::format("settle: footprint fully inside route primitive {}", *settle_signal_.tracked());
+  if (has_settled(observation, now_s, "settle")) {
     phase_ = Phase::idle;
     reset_timers();
+    active_bypass_.reset();
     return;
   }
   // Abort onset (docs/lane_change.md, "Finishing or aborting"): trajectory heads back, persisted.
@@ -130,18 +157,14 @@ void LaneChangeClassifier::detect_abort_completion_or_recommit(
     debug_reason_ = "abort completed: footprint fully back inside the reference lane";
     phase_ = Phase::idle;
     reset_timers();
+    active_bypass_.reset();
     return;
   }
   // A settle stays live from ABORTING (docs/lane_change.md, "Settle still counts").
-  const auto same_lane = [](lanelet::Id tracked, lanelet::Id current) {
-    return tracked == current;
-  };
-  if (settle_signal_.update(
-        observation.settle_lane_id, now_s, config_.settle_confirm_duration_s, same_lane)) {
-    debug_reason_ = fmt::format(
-      "settle from aborting: footprint fully inside route primitive {}", *settle_signal_.tracked());
+  if (has_settled(observation, now_s, "settle from aborting")) {
     phase_ = Phase::idle;
     reset_timers();
+    active_bypass_.reset();
     return;
   }
   // Re-commit (docs/lane_change.md, "Aborting"): trajectory swings back, persisted like onset.
@@ -154,6 +177,10 @@ void LaneChangeClassifier::detect_abort_completion_or_recommit(
     debug_reason_ = fmt::format(
       "re-commit: trajectory crossing to lane {} persisted",
       crossing_signal_.tracked()->target_lane_id);
+    // A re-commit keeps the stored bypass lanes unless the new crossing is a bypass crossing.
+    if (crossing_signal_.tracked()->bypass) {
+      active_bypass_ = crossing_signal_.tracked()->bypass;
+    }
     phase_ = Phase::changing;
     reset_timers();
   }

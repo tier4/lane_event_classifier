@@ -480,7 +480,7 @@ TEST(LaneChangeTest, double_left_change_targets_the_route_primitive)
     config.crossing_look_ahead_m, config.bypass_max_crossing_angle_deg};
   LaneEventContext context;
   context.update(tracker, input);
-  const auto observation = geometry.observe(tracker, input, context);
+  const auto observation = geometry.observe(tracker, input, context, std::nullopt);
   ASSERT_TRUE(observation.crossing.has_value());
   EXPECT_EQ(observation.crossing->target_lane_id, 47);
 }
