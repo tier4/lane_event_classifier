@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <string>
@@ -342,6 +343,22 @@ double nearest_candidate_object_distance_m(
   return nearest_m;
 }
 
+// The candidate objects whose center lies outside the lane. A candidate inside the neighbour lane
+// that the footprint enters is not an object to go around: the ego moves toward it.
+std::vector<geometry_msgs::msg::Pose> candidate_object_poses_outside_lane(
+  const std::vector<geometry_msgs::msg::Pose> & candidate_object_poses,
+  const lanelet::ConstLanelet & lane)
+{
+  std::vector<geometry_msgs::msg::Pose> outside_poses;
+  std::copy_if(
+    candidate_object_poses.cbegin(), candidate_object_poses.cend(),
+    std::back_inserter(outside_poses), [&lane](const geometry_msgs::msg::Pose & pose) {
+      return !lanelet::geometry::inside(
+        lane, lanelet::BasicPoint2d{pose.position.x, pose.position.y});
+    });
+  return outside_poses;
+}
+
 FootprintCrossing get_footprint_crossing(
   const LaneTracker & tracker, const std::unordered_set<lanelet::Id> & sequence_ids,
   const std::vector<lanelet::BasicPoint2d> & footprint,
@@ -361,16 +378,22 @@ FootprintCrossing get_footprint_crossing(
       deepest_footprint_overshoot(tracker, sequence_ids, neighbour_id, footprint);
     const auto neighbour_lane = tracker.get_lanelet(neighbour_id);
     const bool is_shoulder = neighbour_lane && lanelet2_utils::is_shoulder_lane(*neighbour_lane);
+    // Direction guard (docs/lane_crossing.md, "Finding a crossing"): only a candidate outside the
+    // entered neighbour lane can be the object that the footprint goes around.
+    const auto dodged_object_poses =
+      neighbour_lane ? candidate_object_poses_outside_lane(candidate_object_poses, *neighbour_lane)
+                     : candidate_object_poses;
     // The object proximity is the gate that most often blocks an otherwise valid crossing, so the
     // measured distance goes into the note rather than a bare pass/fail.
     const double object_distance_m =
       overshoot.deepest_corner
-        ? nearest_candidate_object_distance_m(candidate_object_poses, *overshoot.deepest_corner)
+        ? nearest_candidate_object_distance_m(dodged_object_poses, *overshoot.deepest_corner)
         : std::numeric_limits<double>::infinity();
     debug_notes.push_back(
       fmt::format(
-        "{}:overshoot{:.2f}m/nearest_object{:.1f}m<={:.1f}m{}", neighbour_id, overshoot.overshoot_m,
-        object_distance_m, footprint_crossing_object_proximity_m,
+        "{}:overshoot{:.2f}m/nearest_object{:.1f}m<={:.1f}m/objects_in_lane{}{}", neighbour_id,
+        overshoot.overshoot_m, object_distance_m, footprint_crossing_object_proximity_m,
+        candidate_object_poses.size() - dodged_object_poses.size(),
         is_shoulder ? " shoulder-exempt" : ""));
     if (is_shoulder) {
       continue;
