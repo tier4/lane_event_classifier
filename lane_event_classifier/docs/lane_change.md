@@ -103,6 +103,11 @@ The abort test and the abort completion of a bypass event use the stored referen
 branch has no `turn_direction`, the held reference lane can move into the branch. A test against
 the branch then reads a path that continues on the route as a return.
 
+During a bypass event, the departure reset of the held reference lane also counts the branch and
+the route lanes after it, two lanes deep. If the branch has `turn_direction`, the held
+lane stays on the reference lane, and the ego drives through the branch. Without the branch in the
+count, the reset can end the event before the body has left the covered lanes.
+
 ### Exemptions
 
 A found crossing is dropped when any of these hold:
