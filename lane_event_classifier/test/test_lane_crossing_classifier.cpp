@@ -715,6 +715,42 @@ TEST(LaneCrossingTest, footprint_over_boundary_with_distant_object_is_not_a_cros
   }
 }
 
+// Direction guard: a body overhang toward an object inside the entered neighbour lane is not a
+// dodge, because the ego moves toward the object, not around it.
+TEST(LaneCrossingTest, footprint_over_boundary_toward_object_in_neighbour_lane_is_not_a_crossing)
+{
+  auto map = load_test_map();
+  ASSERT_TRUE(static_cast<bool>(map));
+
+  Simulator sim{map, make_config()};
+  const std::vector<lanelet::Id> route{route_ids().begin(), route_ids().end()};
+
+  const auto straight_trajectory = build_lane_trajectory(map, {47}, 0.3, 0.9, 20);
+  const auto ego_in_47 = straight_trajectory.front();
+  const auto footprint = build_straddle_footprint(map, 0.6, 1.0);  // 1.0 m into 48, > 0.5 threshold
+  // On the centerline of 48 near the poking corner: inside 48, and within object_lateral_buffer_m
+  // of lane 47, so it is a candidate object.
+  const auto object_point = nearest_point_on(centerline_points(map, 48), footprint[1]);
+  const auto objects =
+    test_maps::make_objects({test_maps::make_object(object_point.x(), object_point.y())});
+
+  int64_t time_ms = 0;
+  for (int cycle = 0; cycle < 10; ++cycle) {
+    const auto [sec, nsec] = stamp_from_ms(time_ms);
+    const auto state = sim.step(
+      test_maps::make_trajectory_input(
+        route, ego_in_47, sec, nsec, straight_trajectory, footprint, TurnIndicatorsReport::DISABLE,
+        objects));
+    EXPECT_NE(state, DS::INTENTIONAL_LANE_CROSSING)
+      << "a body overhang toward an object in the entered lane is not a crossing: "
+      << sim.debug_reason();
+    time_ms += 100;
+  }
+  EXPECT_NE(sim.debug_reason().find("candidates=1"), std::string::npos)
+    << "the object must still be a candidate, so only the direction guard can block the onset: "
+    << sim.debug_reason();
+}
+
 // Cornering guard: an overhang below footprint_boundary_overshoot_m is a graze, not a crossing.
 TEST(LaneCrossingTest, slight_cornering_overhang_is_not_a_crossing)
 {
