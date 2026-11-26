@@ -91,6 +91,18 @@ target lane is the branch. The side is the side of the crossed line: the left bo
 gives a change to the left, and the right bound a change to the right. The exemptions below do not
 apply to a bypass crossing. A branch often has `turn_direction` so that the turn signal comes on.
 
+At the onset of a bypass event, the classifier stores the bypass lanes: the reference lane, the
+branch, and the covered lanes. The covered lanes are the reference lane, the other successor, and
+its successors whose line the branch crosses. A bypass event ends by the bypass end, not by the
+settle: if no footprint point is inside a covered lane for `settle_confirm_duration_s`, the event
+ends. The bypass end replaces the settle while changing and while aborting. The branch overlaps the
+other successor at its start. So the footprint can be fully inside the branch while the body still
+covers the crossed line.
+
+The abort test and the abort completion of a bypass event use the stored reference lane. If the
+branch has no `turn_direction`, the held reference lane can move into the branch. A test against
+the branch then reads a path that continues on the route as a return.
+
 ### Exemptions
 
 A found crossing is dropped when any of these hold:
