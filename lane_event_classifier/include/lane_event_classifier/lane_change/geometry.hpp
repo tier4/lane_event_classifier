@@ -54,7 +54,12 @@ struct LaneChangeObservation
 class LaneChangeGeometry
 {
 public:
-  explicit LaneChangeGeometry(double crossing_look_ahead_m);
+  /**
+   * @param crossing_look_ahead_m Arc length ahead scanned for a trajectory crossing.
+   * @param bypass_max_crossing_angle_deg Largest angle between a bypass branch and the painted line
+   * that it crosses, for the bypass crossing to count (docs/lane_change.md, "Bypass branch").
+   */
+  LaneChangeGeometry(double crossing_look_ahead_m, double bypass_max_crossing_angle_deg);
 
   /** @brief Builds the observation for this cycle from the tracker's (already refreshed) state. */
   [[nodiscard]] LaneChangeObservation observe(
@@ -66,6 +71,13 @@ private:
    * @param trajectory_points Forward trajectory samples (computed once per cycle by observe). */
   [[nodiscard]] std::optional<LaneChangeCrossing> compute_crossing(
     const LaneTracker & tracker, const LaneEventInput & input, const LaneEventContext & context,
+    const std::vector<lanelet::BasicPoint2d> & trajectory_points) const;
+
+  /** @brief The first crossing of the trajectory over a painted line that a route branch of the
+   * reference lane crosses at a small angle (docs/lane_change.md, "Bypass branch"), if any.
+   * @param trajectory_points Forward trajectory samples (computed once per cycle by observe). */
+  [[nodiscard]] std::optional<LaneChangeCrossing> compute_bypass_crossing(
+    const LaneTracker & tracker,
     const std::vector<lanelet::BasicPoint2d> & trajectory_points) const;
 
   /** @brief True when the trajectory heads back into the reference lane (abort observation).
@@ -89,7 +101,8 @@ private:
     const LaneTracker & tracker, const LaneEventInput & input,
     const std::vector<lanelet::Id> & footprint_ids);
 
-  double crossing_look_ahead_m_;  // arc length ahead scanned for a trajectory crossing
+  double crossing_look_ahead_m_;          // arc length ahead scanned for a trajectory crossing
+  double bypass_max_crossing_angle_deg_;  // largest branch-to-line angle of a bypass crossing
 };
 
 }  // namespace lane_event_classifier

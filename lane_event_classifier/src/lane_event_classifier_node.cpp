@@ -67,7 +67,9 @@ void LaneEventClassifierNode::build_classifiers()
   classifiers_.emplace_back(
     std::make_unique<LaneChangeClassifier>(
       params_.lane_change.enable_classifier, params_.lane_change, lane_tracker_,
-      LaneChangeGeometry{params_.lane_change.crossing_look_ahead_m}));
+      LaneChangeGeometry{
+        params_.lane_change.crossing_look_ahead_m,
+        params_.lane_change.bypass_max_crossing_angle_deg}));
   classifiers_.emplace_back(
     std::make_unique<IntentionalCrossingClassifier>(
       params_.lane_crossing.enable_classifier, params_.lane_crossing, lane_tracker_,
