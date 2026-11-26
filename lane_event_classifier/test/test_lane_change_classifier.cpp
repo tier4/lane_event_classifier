@@ -259,6 +259,92 @@ std::optional<int> lane_change_onset_cycle(
   }
   return std::nullopt;
 }
+
+// A bus-sized footprint at base_link: 5.7 m ahead, 1.5 m behind, 2.4 m wide, along the heading.
+std::vector<lanelet::BasicPoint2d> bus_footprint(
+  const lanelet::BasicPoint2d & base_link, const lanelet::BasicPoint2d & heading)
+{
+  const lanelet::BasicPoint2d forward = heading.normalized();
+  const lanelet::BasicPoint2d left{-forward.y(), forward.x()};
+  constexpr double front_m = 5.7;
+  constexpr double rear_m = 1.5;
+  constexpr double half_width_m = 1.2;
+  return {
+    base_link + forward * front_m + left * half_width_m,
+    base_link + forward * front_m - left * half_width_m,
+    base_link - forward * rear_m - left * half_width_m,
+    base_link - forward * rear_m + left * half_width_m};
+}
+
+// One cycle of a drive through the bypass.
+struct BypassCycle
+{
+  std::optional<uint8_t> state;
+  uint8_t published_state{DS::UNDEFINED};
+  lanelet::Id reference_lane_id{lanelet::InvalId};
+  bool is_on_route_before_branch_end{true};  // base_link has not reached the end of B
+  bool covers_r_or_other_lanes{false};       // a footprint corner is inside R, S, or S1
+  bool covers_line_from_branch{false};       // footprint fully inside B, and a corner inside S
+};
+
+// Drives a bus footprint along R -> B -> N at 1 m per 100 ms cycle, waiting wait_cycles at the
+// start. The trajectory is the rest of the route path.
+std::vector<BypassCycle> drive_through_bypass(const test_maps::BypassMap & bypass, int wait_cycles)
+{
+  Simulator sim{bypass.map, make_config()};
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto path = trajectory_along(bypass.map, route, 0.0);
+  const auto inside = [&bypass](lanelet::Id lane_id, const lanelet::BasicPoint2d & point) {
+    return lanelet::geometry::inside(bypass.map->laneletLayer.get(lane_id), point);
+  };
+  const double branch_end_x = bypass.map->laneletLayer.get(bypass.b).centerline2d().back().x();
+  std::vector<BypassCycle> cycles;
+  int64_t time_ms = 0;
+  std::size_t index = 5;
+  for (int cycle = 0; index + 8 < path.size(); ++cycle) {
+    const auto & ego = path[index];
+    const auto footprint = bus_footprint(ego, path[index + 1] - path[index]);
+    const std::vector<lanelet::BasicPoint2d> trajectory(
+      path.begin() + static_cast<std::ptrdiff_t>(index), path.end());
+    const auto [sec, nsec] = stamp_from_ms(time_ms);
+    BypassCycle record;
+    record.state =
+      sim.step(test_maps::make_trajectory_input(route, ego, sec, nsec, trajectory, footprint));
+    record.published_state = sim.published_state();
+    record.reference_lane_id = sim.reference_lane_id();
+    record.is_on_route_before_branch_end = ego.x() < branch_end_x;
+    record.covers_r_or_other_lanes =
+      std::any_of(footprint.begin(), footprint.end(), [&](const auto & corner) {
+        return inside(bypass.r, corner) || inside(bypass.s, corner) || inside(bypass.s1, corner);
+      });
+    record.covers_line_from_branch =
+      std::all_of(
+        footprint.begin(), footprint.end(),
+        [&](const auto & corner) { return inside(bypass.b, corner); }) &&
+      std::any_of(footprint.begin(), footprint.end(), [&](const auto & corner) {
+        return inside(bypass.s, corner);
+      });
+    cycles.push_back(record);
+    time_ms += 100;
+    if (cycle >= wait_cycles) {
+      ++index;
+    }
+  }
+  return cycles;
+}
+
+// Index of the first cycle after start that matches, or cycles.size().
+template <class Predicate>
+std::size_t first_cycle(
+  const std::vector<BypassCycle> & cycles, std::size_t start, const Predicate & predicate)
+{
+  for (std::size_t index = start; index < cycles.size(); ++index) {
+    if (predicate(cycles[index])) {
+      return index;
+    }
+  }
+  return cycles.size();
+}
 }  // namespace
 
 // Single left change 48 -> 47: onset confirms, then the footprint settles inside 47.
@@ -682,6 +768,147 @@ TEST(LaneChangeBypassTest, route_through_the_straight_lane_is_not_lane_change)
   const auto trajectory = trajectory_along(bypass.map, route, 5.0);
   EXPECT_FALSE(
     lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20));
+}
+
+// The bypass event ends by the bypass end: after the body has left R, S, and S1, plus the settle
+// time (0.5 s, 5 cycles). Then LANE_FOLLOWING, with no UNKNOWN and no ABORTING_LANE_CHANGE.
+TEST(LaneChangeBypassTest, bypass_event_ends_after_the_body_leaves_the_other_lane)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_turn_direction = "right";
+  const auto cycles = drive_through_bypass(test_maps::make_bypass_map(options), 0);
+  const auto onset =
+    first_cycle(cycles, 0, [](const auto & c) { return c.state == DS::LANE_CHANGING; });
+  ASSERT_LT(onset, cycles.size());
+  const auto body_left =
+    first_cycle(cycles, onset, [](const auto & c) { return !c.covers_r_or_other_lanes; });
+  const auto end = first_cycle(cycles, onset, [](const auto & c) { return !c.state; });
+  ASSERT_LT(body_left, cycles.size());
+  ASSERT_LT(end, cycles.size()) << "the event must end within the drive";
+  EXPECT_GE(end, body_left + 4) << "the event ends only after the body has left S";
+  EXPECT_LE(end, body_left + 7) << "the event ends soon after the body has left S";
+  EXPECT_EQ(cycles[end].published_state, DS::LANE_FOLLOWING);
+  for (const auto & cycle : cycles) {
+    EXPECT_NE(cycle.published_state, DS::UNKNOWN);
+    EXPECT_NE(cycle.state, DS::ABORTING_LANE_CHANGE);
+  }
+}
+
+// The footprint is fully inside B but still covers the line: the event stays LANE_CHANGING.
+TEST(LaneChangeBypassTest, bypass_event_stays_while_the_branch_footprint_covers_the_line)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_turn_direction = "right";
+  const auto cycles = drive_through_bypass(test_maps::make_bypass_map(options), 0);
+  const auto onset =
+    first_cycle(cycles, 0, [](const auto & c) { return c.state == DS::LANE_CHANGING; });
+  ASSERT_LT(onset, cycles.size());
+  int covering_cycles = 0;
+  for (std::size_t index = onset; index < cycles.size(); ++index) {
+    if (cycles[index].covers_line_from_branch) {
+      ++covering_cycles;
+      EXPECT_EQ(cycles[index].state, DS::LANE_CHANGING) << "cycle " << index;
+    }
+  }
+  EXPECT_GT(covering_cycles, 5) << "the drive must have cycles inside B that cover the line";
+}
+
+// After the onset, the ego waits in R for 1.0 s (longer than the 0.5 s settle): no early end.
+TEST(LaneChangeBypassTest, bypass_event_stays_while_the_ego_approaches_the_split)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_turn_direction = "right";
+  const auto cycles = drive_through_bypass(test_maps::make_bypass_map(options), 13);
+  const auto onset =
+    first_cycle(cycles, 0, [](const auto & c) { return c.state == DS::LANE_CHANGING; });
+  ASSERT_LT(onset, 13u);
+  for (std::size_t index = onset; index < 13u; ++index) {
+    EXPECT_EQ(cycles[index].state, DS::LANE_CHANGING) << "cycle " << index;
+  }
+}
+
+// B has no turn_direction: the held lane moves into B, and the event still ends by the bypass end.
+TEST(LaneChangeBypassTest, bypass_branch_without_turn_tag_ends_by_the_bypass_end)
+{
+  const auto bypass = test_maps::make_bypass_map();
+  const auto cycles = drive_through_bypass(bypass, 0);
+  const auto onset =
+    first_cycle(cycles, 0, [](const auto & c) { return c.state == DS::LANE_CHANGING; });
+  ASSERT_LT(onset, cycles.size());
+  const auto body_left =
+    first_cycle(cycles, onset, [](const auto & c) { return !c.covers_r_or_other_lanes; });
+  const auto end = first_cycle(cycles, onset, [](const auto & c) { return !c.state; });
+  ASSERT_LT(end, cycles.size());
+  EXPECT_GE(end, body_left + 4);
+  EXPECT_LE(end, body_left + 7) << "the bypass end, not a settle in the lane after B";
+  const auto held_in_b = std::any_of(
+    cycles.begin() + static_cast<std::ptrdiff_t>(onset),
+    cycles.begin() + static_cast<std::ptrdiff_t>(end),
+    [&bypass](const auto & c) { return c.reference_lane_id == bypass.b; });
+  EXPECT_TRUE(held_in_b) << "with no turn_direction, the held lane moves into B";
+  for (const auto & cycle : cycles) {
+    EXPECT_NE(cycle.state, DS::ABORTING_LANE_CHANGE);
+  }
+}
+
+// B has turn_direction=right: the held lane stays on R for the whole event.
+TEST(LaneChangeBypassTest, bypass_branch_with_turn_tag_keeps_the_held_lane_on_r)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_turn_direction = "right";
+  const auto bypass = test_maps::make_bypass_map(options);
+  const auto cycles = drive_through_bypass(bypass, 0);
+  const auto onset =
+    first_cycle(cycles, 0, [](const auto & c) { return c.state == DS::LANE_CHANGING; });
+  ASSERT_LT(onset, cycles.size());
+  const auto end = first_cycle(cycles, onset, [](const auto & c) { return !c.state; });
+  for (std::size_t index = onset; index < end; ++index) {
+    EXPECT_EQ(cycles[index].reference_lane_id, bypass.r) << "cycle " << index;
+  }
+}
+
+// In the aborting phase of a bypass event, a footprint fully inside B that still covers the line
+// does not end the event by the normal settle.
+TEST(LaneChangeBypassTest, bypass_abort_does_not_end_by_the_normal_settle_in_the_branch)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_turn_direction = "right";
+  const auto bypass = test_maps::make_bypass_map(options);
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  Simulator sim{bypass.map, make_config()};
+  const lanelet::BasicPoint2d ego_in_r{15.0, 0.0};
+  const auto bypass_trajectory = trajectory_along(bypass.map, route, 15.0);
+  const std::vector<lanelet::BasicPoint2d> back_in_r{{15.0, 0.0}, {17.0, 0.0}, {19.0, 0.0}};
+  const auto footprint_in_r = bus_footprint(ego_in_r, {1.0, 0.0});
+  int64_t time_ms = 0;
+  const auto step = [&](
+                      const lanelet::BasicPoint2d & ego,
+                      const std::vector<lanelet::BasicPoint2d> & trajectory,
+                      const std::vector<lanelet::BasicPoint2d> & footprint) {
+    const auto [sec, nsec] = stamp_from_ms(time_ms);
+    time_ms += 100;
+    return sim.step(test_maps::make_trajectory_input(route, ego, sec, nsec, trajectory, footprint));
+  };
+
+  bool is_changing = false;
+  for (int cycle = 0; cycle < 10 && !is_changing; ++cycle) {
+    is_changing = step(ego_in_r, bypass_trajectory, footprint_in_r) == DS::LANE_CHANGING;
+  }
+  ASSERT_TRUE(is_changing);
+  bool is_aborting = false;
+  for (int cycle = 0; cycle < 10 && !is_aborting; ++cycle) {
+    is_aborting = step(ego_in_r, back_in_r, footprint_in_r) == DS::ABORTING_LANE_CHANGE;
+  }
+  ASSERT_TRUE(is_aborting);
+
+  // Fully inside B, still covering the dashed right bound of S, with a path that stays inside.
+  const lanelet::BasicPoint2d ego_in_b{30.0, -1.0};
+  const auto footprint_in_b = bus_footprint(ego_in_b, {10.0, -1.0});
+  const std::vector<lanelet::BasicPoint2d> along_b{{30.0, -1.0}, {32.0, -1.2}, {34.0, -1.4}};
+  for (int cycle = 0; cycle < 10; ++cycle) {
+    EXPECT_EQ(step(ego_in_b, along_b, footprint_in_b), DS::ABORTING_LANE_CHANGE)
+      << "cycle " << cycle << ": the normal settle on B must not end a bypass event";
+  }
 }
 
 }  // namespace lane_event_classifier
