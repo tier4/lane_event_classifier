@@ -150,6 +150,17 @@ public:
 
   std::optional<uint8_t> step(const LaneEventInput & input)
   {
+    // Mirrors trigger 2 of the node's check_tracking_state: a held lane resets once base_link is
+    // more than lane_departure_reset_distance_m (5 m) from it and the next lanes it can move into.
+    // The Simulator only counts the resets.
+    const auto & position = input.odometry_ptr->pose.pose.position;
+    if (tracker_.is_reference_lane_held()) {
+      const auto distance = tracker_.distance_to_lane_or_next(
+        tracker_.reference_lane().reference_lane_id, {position.x, position.y});
+      if (distance && *distance > departure_reset_distance_m) {
+        ++departure_reset_count_;
+      }
+    }
     [[maybe_unused]] const auto update_result = tracker_.update(input);
     context_.update(tracker_, input);
     classifier_.update(input, context_);
@@ -174,6 +185,8 @@ public:
 
   [[nodiscard]] bool is_lane_following() const { return lane_following_result_.is_following; }
 
+  [[nodiscard]] int departure_reset_count() const { return departure_reset_count_; }
+
   // The state the node publishes for the last cycle: the classifier state when it claims an event,
   // else LANE_FOLLOWING or, for a departure, UNKNOWN.
   [[nodiscard]] uint8_t published_state() const
@@ -191,6 +204,8 @@ private:
   LaneFollowingChecker lane_following_checker_;
   LaneFollowingResult lane_following_result_{};
   std::optional<uint8_t> state_;
+  static constexpr double departure_reset_distance_m = 5.0;  // lane_departure_reset_distance_m
+  int departure_reset_count_{0};
 };
 
 LaneChangeConfig make_config()
@@ -285,6 +300,7 @@ struct BypassCycle
   bool is_on_route_before_branch_end{true};  // base_link has not reached the end of B
   bool covers_r_or_other_lanes{false};       // a footprint corner is inside R, S, or S1
   bool covers_line_from_branch{false};       // footprint fully inside B, and a corner inside S
+  int departure_reset_count{0};              // trigger 2 resets so far (see Simulator)
 };
 
 // Drives a bus footprint along R -> B -> N at 1 m per 100 ms cycle, waiting wait_cycles at the
@@ -311,6 +327,7 @@ std::vector<BypassCycle> drive_through_bypass(const test_maps::BypassMap & bypas
     record.state =
       sim.step(test_maps::make_trajectory_input(route, ego, sec, nsec, trajectory, footprint));
     record.published_state = sim.published_state();
+    record.departure_reset_count = sim.departure_reset_count();
     record.reference_lane_id = sim.reference_lane_id();
     record.is_on_route_before_branch_end = ego.x() < branch_end_x;
     record.covers_r_or_other_lanes =
@@ -908,6 +925,57 @@ TEST(LaneChangeBypassTest, bypass_abort_does_not_end_by_the_normal_settle_in_the
   for (int cycle = 0; cycle < 10; ++cycle) {
     EXPECT_EQ(step(ego_in_b, along_b, footprint_in_b), DS::ABORTING_LANE_CHANGE)
       << "cycle " << cycle << ": the normal settle on B must not end a bypass event";
+  }
+}
+
+// S is short, so B crosses the line of S1. With turn_direction on B, the held lane stays on R, and
+// base_link moves more than 5 m from S while the body still covers S1. The 5 m reset must not come.
+TEST(LaneChangeBypassTest, bypass_event_has_no_departure_reset)
+{
+  test_maps::BypassMapOptions options;
+  options.sibling_length_m = 10.0;
+  options.branch_turn_direction = "right";
+  const auto cycles = drive_through_bypass(test_maps::make_bypass_map(options), 0);
+  const auto onset =
+    first_cycle(cycles, 0, [](const auto & c) { return c.state == DS::LANE_CHANGING; });
+  ASSERT_LT(onset, cycles.size());
+  const auto body_left =
+    first_cycle(cycles, onset, [](const auto & c) { return !c.covers_r_or_other_lanes; });
+  const auto end = first_cycle(cycles, onset, [](const auto & c) { return !c.state; });
+  ASSERT_LT(end, cycles.size());
+  EXPECT_GE(end, body_left + 4) << "the event ends by the bypass end";
+  EXPECT_EQ(cycles.back().departure_reset_count, 0)
+    << "during a bypass event the reset also counts B and the route lanes after B";
+  for (const auto & cycle : cycles) {
+    EXPECT_NE(cycle.state, DS::ABORTING_LANE_CHANGE);
+  }
+}
+
+// An empty footprint is not clear of the bypass lanes, the same as for the confidence signal.
+TEST(LaneChangeBypassTest, empty_footprint_does_not_end_a_bypass_event)
+{
+  const auto bypass = test_maps::make_bypass_map();
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  const auto ego = trajectory.front();
+  Simulator sim{bypass.map, make_config()};
+  int64_t time_ms = 0;
+  bool is_changing = false;
+  for (int cycle = 0; cycle < 10 && !is_changing; ++cycle) {
+    const auto [sec, nsec] = stamp_from_ms(time_ms);
+    time_ms += 100;
+    is_changing =
+      sim.step(test_maps::make_trajectory_input(route, ego, sec, nsec, trajectory, {ego})) ==
+      DS::LANE_CHANGING;
+  }
+  ASSERT_TRUE(is_changing);
+  for (int cycle = 0; cycle < 10; ++cycle) {
+    const auto [sec, nsec] = stamp_from_ms(time_ms);
+    time_ms += 100;
+    EXPECT_EQ(
+      sim.step(test_maps::make_trajectory_input(route, ego, sec, nsec, trajectory, {})),
+      DS::LANE_CHANGING)
+      << "cycle " << cycle;
   }
 }
 
