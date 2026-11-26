@@ -98,7 +98,10 @@ trajectory source is preferred (it is the earlier signal); the footprint source 
   centerline never crosses, a yawed body whose corner is over the line while `base_link` is not, and
   keeps a small cornering overhang from counting. The proximity check ties the crossing to the object
   it dodges, rather than any candidate merely qualifying within the far longer
-  `object_longitudinal_window_m`. It is ground truth, not a prediction.
+  `object_longitudinal_window_m`. It is ground truth, not a prediction. A candidate whose center is
+  inside the lane that the corner enters does not count, because the body moves toward that object,
+  not around it. An example is a car that waits in the next lane while the ego stops in a narrow
+  lane with a corner over the line.
 
 The side of the crossing (left or right) comes from which reference boundary is nearer the crossing
 point.
@@ -167,7 +170,7 @@ Defaults: [`param/lane_event_classifier.param.yaml`](../param/lane_event_classif
 | `crossing_persist_duration_s`           | 0.3     | Seconds a crossing must persist (same side, stable point) before onset.                                          |
 | `crossing_position_tolerance_m`         | 2.0     | How far the crossing point may move and still count as the same crossing.                                        |
 | `footprint_boundary_overshoot_m`        | 0.3     | How far a footprint corner must poke past the boundary for the physical crossing source to count.                |
-| `footprint_crossing_object_proximity_m` | 10.0    | Max distance from the poking corner to a candidate object for the physical crossing source to count.             |
+| `footprint_crossing_object_proximity_m` | 10.0    | Max distance from the poking corner to a candidate object outside the entered lane, for the physical source.     |
 | `settle_confirm_duration_s`             | 0.7     | Seconds the footprint must stay fully back inside the straight lane sequence to confirm a return.                |
 | `confidence_factor`                     | 0.3     | Fraction the persistence window shrinks to when a confidence signal is present (0 < factor < 1).                 |
 | `object_longitudinal_window_m`          | 100.0   | Ahead-of-ego arc window along the straight lane sequence in which a candidate object must lie.                   |
