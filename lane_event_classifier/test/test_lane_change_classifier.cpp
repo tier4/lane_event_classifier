@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -209,6 +210,54 @@ std::pair<int32_t, uint32_t> stamp_from_ms(int64_t total_ms)
 {
   return {
     static_cast<int32_t>(total_ms / 1000), static_cast<uint32_t>((total_ms % 1000) * 1'000'000)};
+}
+
+// The centerlines of the lanes, joined in order, sampled every metre, from start_x on.
+std::vector<lanelet::BasicPoint2d> trajectory_along(
+  const lanelet::LaneletMapPtr & map, const std::vector<lanelet::Id> & lane_ids, double start_x)
+{
+  std::vector<lanelet::BasicPoint2d> corners;
+  for (const auto id : lane_ids) {
+    for (const auto & point : centerline_points(map, id)) {
+      if (corners.empty() || (point - corners.back()).norm() > 1e-6) {
+        corners.push_back(point);
+      }
+    }
+  }
+  std::vector<lanelet::BasicPoint2d> trajectory;
+  for (std::size_t index = 0; index + 1 < corners.size(); ++index) {
+    const lanelet::BasicPoint2d step = corners[index + 1] - corners[index];
+    const auto count = static_cast<int>(std::ceil(step.norm()));
+    for (int k = 0; k < count; ++k) {
+      const lanelet::BasicPoint2d point = corners[index] + step * (static_cast<double>(k) / count);
+      if (point.x() >= start_x) {
+        trajectory.push_back(point);
+      }
+    }
+  }
+  trajectory.push_back(corners.back());
+  return trajectory;
+}
+
+// The cycle (100 ms each) in which LANE_CHANGING starts, or nullopt within max_cycles. The ego
+// stands still at the first trajectory point, with a one-point footprint.
+std::optional<int> lane_change_onset_cycle(
+  const lanelet::LaneletMapPtr & map, const std::vector<lanelet::Id> & route,
+  const std::vector<lanelet::BasicPoint2d> & trajectory, uint8_t turn_indicator, int max_cycles)
+{
+  Simulator sim{map, make_config()};
+  const auto ego = trajectory.front();
+  int64_t time_ms = 0;
+  for (int cycle = 0; cycle < max_cycles; ++cycle) {
+    const auto [sec, nsec] = stamp_from_ms(time_ms);
+    const auto state = sim.step(
+      test_maps::make_trajectory_input(route, ego, sec, nsec, trajectory, {ego}, turn_indicator));
+    if (state == DS::LANE_CHANGING) {
+      return cycle;
+    }
+    time_ms += 100;
+  }
+  return std::nullopt;
 }
 }  // namespace
 
@@ -527,6 +576,110 @@ TEST(LaneChangeTest, empty_footprint_is_not_a_confidence_signal)
   const int cycles_empty_footprint = onset_cycle({});
   EXPECT_EQ(cycles_empty_footprint, cycles_straddling)
     << "an empty footprint must not be read as \"off the route primitives\"";
+}
+
+// PDDP-886 bypass: the route takes the branch B, which crosses the dashed right bound of the
+// straight lane S at about 5.7 degrees.
+TEST(LaneChangeBypassTest, bypass_branch_across_dashed_line_is_lane_change)
+{
+  const auto bypass = test_maps::make_bypass_map();
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  EXPECT_TRUE(
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20))
+    << "a branch across a painted line of the other successor is a lane change";
+}
+
+// The side comes from the crossed bound: the right bound of S gives a change to the right, so
+// only the right blinker shortens the onset wait.
+TEST(LaneChangeBypassTest, bypass_branch_side_follows_the_crossed_bound)
+{
+  const auto bypass = test_maps::make_bypass_map();
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  const auto right =
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::ENABLE_RIGHT, 20);
+  const auto left =
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::ENABLE_LEFT, 20);
+  ASSERT_TRUE(right);
+  ASSERT_TRUE(left);
+  EXPECT_LT(*right, *left) << "the crossing is to the right, so only the right blinker counts";
+}
+
+// S is short, so the crossed line is the right bound of S1, the successor of S.
+TEST(LaneChangeBypassTest, bypass_line_of_the_successor_of_the_other_lane_counts)
+{
+  test_maps::BypassMapOptions options;
+  options.sibling_length_m = 10.0;
+  const auto bypass = test_maps::make_bypass_map(options);
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  EXPECT_TRUE(
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20));
+}
+
+// A branch that crosses the line at 45 degrees is over the angle limit.
+TEST(LaneChangeBypassTest, steep_branch_is_not_lane_change)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_length_m = 4.0;
+  const auto bypass = test_maps::make_bypass_map(options);
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  EXPECT_FALSE(
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20));
+}
+
+// A merge crosses the line too, but M and S have no shared predecessor.
+TEST(LaneChangeBypassTest, merge_across_a_line_is_not_lane_change)
+{
+  const auto merge = test_maps::make_bypass_merge_map();
+  const std::vector<lanelet::Id> route{merge.q, merge.b, merge.s1};
+  const auto trajectory = trajectory_along(merge.map, route, 5.0);
+  EXPECT_FALSE(
+    lane_change_onset_cycle(merge.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20));
+}
+
+TEST(LaneChangeBypassTest, branch_beside_a_road_shoulder_is_not_lane_change)
+{
+  test_maps::BypassMapOptions options;
+  options.is_sibling_shoulder = true;
+  const auto bypass = test_maps::make_bypass_map(options);
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  EXPECT_FALSE(
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20));
+}
+
+TEST(LaneChangeBypassTest, branch_across_a_virtual_line_is_not_lane_change)
+{
+  test_maps::BypassMapOptions options;
+  options.is_crossed_line_virtual = true;
+  const auto bypass = test_maps::make_bypass_map(options);
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  EXPECT_FALSE(
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20));
+}
+
+TEST(LaneChangeBypassTest, branch_without_a_virtual_bound_is_not_lane_change)
+{
+  test_maps::BypassMapOptions options;
+  options.has_branch_virtual_bound = false;
+  const auto bypass = test_maps::make_bypass_map(options);
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  EXPECT_FALSE(
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20));
+}
+
+TEST(LaneChangeBypassTest, route_through_the_straight_lane_is_not_lane_change)
+{
+  const auto bypass = test_maps::make_bypass_map();
+  const std::vector<lanelet::Id> route{bypass.r, bypass.s, bypass.s1};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  EXPECT_FALSE(
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20));
 }
 
 }  // namespace lane_event_classifier
