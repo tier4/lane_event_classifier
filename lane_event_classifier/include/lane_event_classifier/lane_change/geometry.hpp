@@ -108,9 +108,10 @@ private:
     const LaneTracker & tracker, lanelet::Id origin_lane_id, bool has_forward_crossing,
     const std::vector<lanelet::BasicPoint2d> & trajectory_points);
 
-  /** @brief True when no footprint point is inside a covered lane of the bypass event. */
+  /** @brief True when no footprint point is inside a covered lane of the bypass event.
+   * @param footprint_ids Lanes the footprint touches (computed once per cycle by observe). */
   [[nodiscard]] static bool is_footprint_clear_of_lanes(
-    const LaneTracker & tracker, const LaneEventInput & input,
+    const LaneEventInput & input, const std::vector<lanelet::Id> & footprint_ids,
     const std::vector<lanelet::Id> & lane_ids);
 
   /** @brief True when no footprint corner lies inside any route-preferred primitive (the off-route

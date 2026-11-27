@@ -290,7 +290,8 @@ LaneChangeObservation LaneChangeGeometry::observe(
     tracker.is_footprint_fully_inside_lane(origin_lane_id, input.footprint);
   observation.settle_lane_id = compute_settle_lane_id(tracker, input, footprint_ids);
   observation.is_footprint_clear_of_bypass_lanes =
-    active_bypass && is_footprint_clear_of_lanes(tracker, input, active_bypass->covered_lane_ids);
+    active_bypass &&
+    is_footprint_clear_of_lanes(input, footprint_ids, active_bypass->covered_lane_ids);
   return observation;
 }
 
@@ -434,7 +435,7 @@ bool LaneChangeGeometry::compute_trajectory_returns_to_reference(
 }
 
 bool LaneChangeGeometry::is_footprint_clear_of_lanes(
-  const LaneTracker & tracker, const LaneEventInput & input,
+  const LaneEventInput & input, const std::vector<lanelet::Id> & footprint_ids,
   const std::vector<lanelet::Id> & lane_ids)
 {
   // Bypass end (docs/lane_change.md, "Bypass branch"): the whole body is past the crossed lines.
@@ -442,12 +443,10 @@ bool LaneChangeGeometry::is_footprint_clear_of_lanes(
   if (input.footprint.empty()) {
     return false;
   }
+  // footprint_ids holds every lane that a footprint point is inside.
   return std::none_of(
-    input.footprint.cbegin(), input.footprint.cend(), [&](const lanelet::BasicPoint2d & point) {
-      const auto ids_at_point = tracker.lanelet_ids_at(point);
-      return std::any_of(ids_at_point.cbegin(), ids_at_point.cend(), [&](const lanelet::Id id) {
-        return std::find(lane_ids.cbegin(), lane_ids.cend(), id) != lane_ids.cend();
-      });
+    footprint_ids.cbegin(), footprint_ids.cend(), [&lane_ids](const lanelet::Id id) {
+      return std::find(lane_ids.cbegin(), lane_ids.cend(), id) != lane_ids.cend();
     });
 }
 
