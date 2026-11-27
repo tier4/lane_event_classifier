@@ -89,6 +89,12 @@ lane_event_classifier:
       description: Maximum angle between the centerline of a bypass branch and the painted line of the other successor that it crosses, for the bypass crossing to start a lane change (PDDP-886)
       validation:
         bounds<>: [0.0, 90.0]
+    bypass_min_side_offset_m:
+      type: double
+      default_value: 2.0
+      description: Minimum side offset of the end of a bypass branch from the end of the reference lane, across the end heading of the reference lane, for the bypass crossing to start a lane change. A lane split moves the branch less than one lane width (PDDP-886)
+      validation:
+        gt_eq<>: [0.0]
   lane_crossing:
     enable_classifier:
       type: bool

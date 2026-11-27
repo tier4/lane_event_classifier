@@ -70,8 +70,12 @@ public:
    * @param crossing_look_ahead_m Arc length ahead scanned for a trajectory crossing.
    * @param bypass_max_crossing_angle_deg Largest angle between a bypass branch and the painted line
    * that it crosses, for the bypass crossing to count (docs/lane_change.md, "Bypass branch").
+   * @param bypass_min_side_offset_m Smallest side offset of the end of a bypass branch from the
+   * end of the reference lane (docs/lane_change.md, "Bypass branch").
    */
-  LaneChangeGeometry(double crossing_look_ahead_m, double bypass_max_crossing_angle_deg);
+  LaneChangeGeometry(
+    double crossing_look_ahead_m, double bypass_max_crossing_angle_deg,
+    double bypass_min_side_offset_m);
 
   /**
    * @brief Builds the observation for this cycle from the tracker's (already refreshed) state.
@@ -125,6 +129,7 @@ private:
 
   double crossing_look_ahead_m_;          // arc length ahead scanned for a trajectory crossing
   double bypass_max_crossing_angle_deg_;  // largest branch-to-line angle of a bypass crossing
+  double bypass_min_side_offset_m_;       // smallest side offset of the end of a bypass branch
 };
 
 }  // namespace lane_event_classifier

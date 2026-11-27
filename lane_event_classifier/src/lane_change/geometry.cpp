@@ -129,17 +129,41 @@ struct BypassLine
 };
 
 // The bypass lines of the reference lane (docs/lane_change.md, "Bypass branch"): a successor B on
-// the route with a virtual bound crosses a non-virtual bound of another successor S (not a road
-// shoulder), or of a successor of S within the length of B, at less than max_angle_deg.
+// the route with a virtual bound, ending at least min_side_offset_m to the side, crosses a
+// non-virtual bound of another successor S (not a road shoulder), or of a successor of S within
+// the length of B, at less than max_angle_deg.
+// Side offset of the end of the line from the end of the reference centerline, across the end
+// heading of the reference lane (left positive); 0.0 when the reference lane has no length.
+double side_offset_m(
+  const lanelet::ConstLineString2d & reference_centerline, const lanelet::ConstLineString2d & line)
+{
+  constexpr double heading_window_m = 5.0;
+  const double length = lanelet::geometry::length(reference_centerline);
+  const lanelet::BasicPoint2d reference_end =
+    lanelet::geometry::interpolatedPointAtDistance(reference_centerline, length);
+  const lanelet::BasicPoint2d before_end = lanelet::geometry::interpolatedPointAtDistance(
+    reference_centerline, std::max(0.0, length - heading_window_m));
+  const lanelet::BasicPoint2d heading = reference_end - before_end;
+  if (heading.norm() <= 0.0 || line.empty()) {
+    return 0.0;
+  }
+  const lanelet::BasicPoint2d unit = heading.normalized();
+  const lanelet::BasicPoint2d offset = line.back().basicPoint() - reference_end;
+  return unit.x() * offset.y() - unit.y() * offset.x();
+}
+
 std::vector<BypassLine> find_bypass_lines(
-  const LaneTracker & tracker, lanelet::Id reference_lane_id, double max_angle_deg)
+  const LaneTracker & tracker, lanelet::Id reference_lane_id, double max_angle_deg,
+  double min_side_offset_m)
 {
   constexpr double angle_window_m = 1.0;
   std::vector<BypassLine> bypass_lines;
   const auto next_lane_ids = tracker.next_lane_ids(reference_lane_id);
-  if (next_lane_ids.size() < 2) {
+  const auto reference_lane = tracker.get_lanelet(reference_lane_id);
+  if (next_lane_ids.size() < 2 || !reference_lane) {
     return bypass_lines;
   }
+  const auto reference_centerline = reference_lane->centerline2d();
   for (const auto branch_lane_id : next_lane_ids) {
     const auto branch = tracker.get_lanelet(branch_lane_id);
     if (
@@ -149,6 +173,10 @@ std::vector<BypassLine> find_bypass_lines(
       continue;
     }
     const auto branch_centerline = branch->centerline2d();
+    // The branch itself moves to the side; in a lane split it moves less than one lane width.
+    if (std::abs(side_offset_m(reference_centerline, branch_centerline)) < min_side_offset_m) {
+      continue;
+    }
     const auto branch_line = to_line_string(branch_centerline);
     const double branch_length_m = lanelet::geometry::length(branch_centerline);
     for (const auto other_lane_id : next_lane_ids) {
@@ -231,9 +259,11 @@ TrajectoryCrossingScan scan_trajectory_for_crossing(
 }  // namespace
 
 LaneChangeGeometry::LaneChangeGeometry(
-  double crossing_look_ahead_m, double bypass_max_crossing_angle_deg)
+  double crossing_look_ahead_m, double bypass_max_crossing_angle_deg,
+  double bypass_min_side_offset_m)
 : crossing_look_ahead_m_{crossing_look_ahead_m},
-  bypass_max_crossing_angle_deg_{bypass_max_crossing_angle_deg}
+  bypass_max_crossing_angle_deg_{bypass_max_crossing_angle_deg},
+  bypass_min_side_offset_m_{bypass_min_side_offset_m}
 {
 }
 
@@ -342,7 +372,8 @@ std::optional<LaneChangeCrossing> LaneChangeGeometry::compute_bypass_crossing(
     return std::nullopt;
   }
   const auto bypass_lines = find_bypass_lines(
-    tracker, tracker.reference_lane().reference_lane_id, bypass_max_crossing_angle_deg_);
+    tracker, tracker.reference_lane().reference_lane_id, bypass_max_crossing_angle_deg_,
+    bypass_min_side_offset_m_);
   if (bypass_lines.empty()) {
     return std::nullopt;
   }

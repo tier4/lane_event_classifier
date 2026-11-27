@@ -179,6 +179,7 @@ Defaults: [`param/lane_event_classifier.param.yaml`](../param/lane_event_classif
 | `crossing_position_tolerance_m` | 2.0     | How far the crossing point may move and still count as the same crossing.                        |
 | `confidence_factor`             | 0.3     | Fraction the persistence window shrinks to when a confidence signal is present (0 < factor < 1). |
 | `bypass_max_crossing_angle_deg` | 30.0    | Largest angle between a bypass branch and the painted line it crosses (see Bypass branch).       |
+| `bypass_min_side_offset_m`      | 2.0     | Smallest side offset of the end of a bypass branch from the end of the reference lane.           |
 | `settle_confirm_duration_s`     | 0.7     | Seconds the footprint must stay fully inside the target route primitive to confirm a completion. |
 
 ## Design notes

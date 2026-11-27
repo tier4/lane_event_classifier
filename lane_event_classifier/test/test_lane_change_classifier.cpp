@@ -141,7 +141,9 @@ class Simulator
 {
 public:
   Simulator(lanelet::LaneletMapPtr map, LaneChangeConfig config)
-  : classifier_{true, config, tracker_, LaneChangeGeometry{config.crossing_look_ahead_m, config.bypass_max_crossing_angle_deg}},
+  : classifier_{true, config, tracker_, LaneChangeGeometry{
+        config.crossing_look_ahead_m, config.bypass_max_crossing_angle_deg,
+        config.bypass_min_side_offset_m}},
     lane_following_checker_{LaneFollowingConfig{}, LaneFollowingGeometry{LaneFollowingConfig{}}}
   {
     const auto result = tracker_.set_lanelet_map(map);
@@ -494,7 +496,8 @@ TEST(LaneChangeTest, double_left_change_targets_the_route_primitive)
 
   const auto config = make_config();
   const LaneChangeGeometry geometry{
-    config.crossing_look_ahead_m, config.bypass_max_crossing_angle_deg};
+    config.crossing_look_ahead_m, config.bypass_max_crossing_angle_deg,
+    config.bypass_min_side_offset_m};
   LaneEventContext context;
   context.update(tracker, input);
   const auto observation = geometry.observe(tracker, input, context, std::nullopt);
