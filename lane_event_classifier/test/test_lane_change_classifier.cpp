@@ -19,6 +19,7 @@
 #include <autoware/lanelet2_utils/conversion.hpp>
 #include <lane_event_classifier/detail/lane_tracker.hpp>
 #include <lane_event_classifier/lane_change/classifier.hpp>
+#include <lane_event_classifier/lane_crossing/classifier.hpp>
 #include <lane_event_classifier/lane_following/checker.hpp>
 
 #include <autoware_vehicle_msgs/msg/turn_indicators_report.hpp>
@@ -135,8 +136,36 @@ std::vector<lanelet::BasicPoint2d> footprint_box(const lanelet::BasicPoint2d & c
     {center.x() - half, center.y() + half}};
 }
 
-// Drives one cycle exactly as the node does: update, classify, hold or release (re-anchor when an
-// event ends), then the lane-following check.
+// A lane crossing classifier with the values of param/lane_event_classifier.param.yaml.
+IntentionalCrossingClassifier make_lane_crossing_classifier(const LaneTracker & tracker)
+{
+  LaneCrossingConfig config;
+  config.enable_classifier = true;
+  config.crossing_look_ahead_m = 30.0;
+  config.predictive_lateral_trigger_distance_m = 0.5;
+  config.crossing_persist_duration_s = 0.3;
+  config.crossing_position_tolerance_m = 5.0;
+  config.footprint_boundary_overshoot_m = 0.4;
+  config.footprint_crossing_object_proximity_m = 75.0;
+  config.settle_confirm_duration_s = 0.7;
+  config.confidence_factor = 0.3;
+  config.object_longitudinal_window_m = 100.0;
+  config.object_lateral_buffer_m = 1.5;
+  config.ignored_object_labels = {"UNKNOWN"};
+  config.object_qualifying_memory_s = 3.0;
+  return IntentionalCrossingClassifier{
+    true, config, tracker,
+    LaneCrossingGeometry{CrossingThresholds{
+      config.crossing_look_ahead_m, config.footprint_boundary_overshoot_m,
+      config.predictive_lateral_trigger_distance_m, config.footprint_crossing_object_proximity_m}},
+    LaneCrossingObjects{
+      config.object_longitudinal_window_m, config.object_lateral_buffer_m,
+      config.ignored_object_labels}};
+}
+
+// Drives one cycle exactly as the node does: update, classify (the lane change before the lane
+// crossing, the first claiming classifier wins), hold or release (re-anchor when an event ends),
+// then the lane-following check.
 class Simulator
 {
 public:
@@ -144,6 +173,7 @@ public:
   : classifier_{true, config, tracker_, LaneChangeGeometry{
         config.crossing_look_ahead_m, config.bypass_max_crossing_angle_deg,
         config.bypass_min_side_offset_m}},
+    crossing_classifier_{make_lane_crossing_classifier(tracker_)},
     lane_following_checker_{LaneFollowingConfig{}, LaneFollowingGeometry{LaneFollowingConfig{}}}
   {
     const auto result = tracker_.set_lanelet_map(map);
@@ -166,8 +196,12 @@ public:
     [[maybe_unused]] const auto update_result = tracker_.update(input);
     context_.update(tracker_, input);
     classifier_.update(input, context_);
+    crossing_classifier_.update(input, context_);
     state_ = classifier_.get_state();
-    const bool is_active = state_ == DS::LANE_CHANGING || state_ == DS::ABORTING_LANE_CHANGE;
+    if (!state_) {
+      state_ = crossing_classifier_.get_state();
+    }
+    const bool is_active = state_.has_value();
     const bool was_held = tracker_.is_reference_lane_held();
     tracker_.apply_reference_lane_hold(is_active);
     if (was_held && !tracker_.is_reference_lane_held()) {
@@ -203,6 +237,7 @@ private:
   LaneTracker tracker_;
   LaneEventContext context_;
   LaneChangeClassifier classifier_;
+  IntentionalCrossingClassifier crossing_classifier_;
   LaneFollowingChecker lane_following_checker_;
   LaneFollowingResult lane_following_result_{};
   std::optional<uint8_t> state_;
@@ -306,8 +341,10 @@ struct BypassCycle
 };
 
 // Drives a bus footprint along R -> B -> N at 1 m per 100 ms cycle, waiting wait_cycles at the
-// start. The trajectory is the rest of the route path.
-std::vector<BypassCycle> drive_through_bypass(const test_maps::BypassMap & bypass, int wait_cycles)
+// start. The trajectory is the rest of the route path. The objects are the same in every cycle.
+std::vector<BypassCycle> drive_through_bypass(
+  const test_maps::BypassMap & bypass, int wait_cycles,
+  const autoware_perception_msgs::msg::PredictedObjects::ConstSharedPtr & objects = nullptr)
 {
   Simulator sim{bypass.map, make_config()};
   const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
@@ -326,8 +363,9 @@ std::vector<BypassCycle> drive_through_bypass(const test_maps::BypassMap & bypas
       path.begin() + static_cast<std::ptrdiff_t>(index), path.end());
     const auto [sec, nsec] = stamp_from_ms(time_ms);
     BypassCycle record;
-    record.state =
-      sim.step(test_maps::make_trajectory_input(route, ego, sec, nsec, trajectory, footprint));
+    record.state = sim.step(
+      test_maps::make_trajectory_input(
+        route, ego, sec, nsec, trajectory, footprint, TurnIndicatorsReport::DISABLE, objects));
     record.published_state = sim.published_state();
     record.departure_reset_count = sim.departure_reset_count();
     record.reference_lane_id = sim.reference_lane_id();
@@ -952,6 +990,29 @@ TEST(LaneChangeBypassTest, bypass_event_has_no_departure_reset)
   for (const auto & cycle : cycles) {
     EXPECT_NE(cycle.state, DS::ABORTING_LANE_CHANGE);
   }
+}
+
+// A car is parked at the right edge of N (PDDP-886, the bypasses at 1527 and 356). With
+// turn_direction on B, the held lane stays on R. The lanes of R reach 30 m, so N is not one of
+// them, and the body in N is outside them, with the car near it. That body position is the lane
+// change itself: no INTENTIONAL_LANE_CROSSING may follow it.
+TEST(LaneChangeBypassTest, bypass_event_is_not_followed_by_a_lane_crossing)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_turn_direction = "right";
+  const auto bypass = test_maps::make_bypass_map(options);
+  const auto car_beside_n = test_maps::make_objects({test_maps::make_object(79.0, -7.2, 4.5, 1.8)});
+  const auto cycles = drive_through_bypass(bypass, 0, car_beside_n);
+  const auto onset =
+    first_cycle(cycles, 0, [](const auto & c) { return c.state == DS::LANE_CHANGING; });
+  ASSERT_LT(onset, cycles.size());
+  const auto end =
+    first_cycle(cycles, onset, [](const auto & c) { return c.state != DS::LANE_CHANGING; });
+  ASSERT_LT(end, cycles.size()) << "the lane change must end within the drive";
+  const auto crossing = first_cycle(
+    cycles, 0, [](const auto & c) { return c.published_state == DS::INTENTIONAL_LANE_CROSSING; });
+  EXPECT_EQ(crossing, cycles.size()) << "INTENTIONAL_LANE_CROSSING at cycle " << crossing
+                                     << ", the lane change ended at cycle " << end;
 }
 
 // An empty footprint is not clear of the bypass lanes, the same as for the confidence signal.
