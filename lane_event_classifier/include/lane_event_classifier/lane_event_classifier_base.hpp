@@ -60,8 +60,9 @@ public:
   [[nodiscard]] virtual std::string debug_reason() const { return {}; }
 
   /**
-   * @brief Lanes that the departure reset also counts while this classifier's event is active,
-   * for example the bypass branch of a lane change (docs/lane_change.md, "Bypass branch").
+   * @brief Lanes that the departure reset and the lane crossing classifier also count while this
+   * classifier's event is active, for example the bypass branch of a lane change
+   * (docs/lane_change.md, "Bypass branch").
    */
   [[nodiscard]] virtual std::vector<lanelet::Id> departure_reset_lane_ids() const { return {}; }
 };

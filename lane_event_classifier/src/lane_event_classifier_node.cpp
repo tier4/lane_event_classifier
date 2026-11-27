@@ -29,6 +29,22 @@
 namespace lane_event_classifier
 {
 
+namespace
+{
+// The lanes that the active events add to the held reference lane, for example the bypass branch of
+// a lane change (docs/lane_change.md, "Bypass branch").
+std::vector<lanelet::Id> collect_event_lane_ids(
+  const std::vector<std::unique_ptr<LaneEventClassifierBase>> & classifiers)
+{
+  std::vector<lanelet::Id> event_lane_ids;
+  for (const auto & classifier : classifiers) {
+    const auto lane_ids = classifier->departure_reset_lane_ids();
+    event_lane_ids.insert(event_lane_ids.end(), lane_ids.begin(), lane_ids.end());
+  }
+  return event_lane_ids;
+}
+}  // namespace
+
 LaneEventClassifierNode::LaneEventClassifierNode(const rclcpp::NodeOptions & node_options)
 : Node("lane_event_classifier", node_options),
   param_listener_{this->get_node_parameters_interface()},
@@ -169,13 +185,8 @@ tl::expected<void, std::string> LaneEventClassifierNode::check_tracking_state()
   // a seam. Intersection and shoulder lanes do not count, as for the forward move. An active event
   // can add lanes, for example the bypass branch of a lane change.
   if (lane_tracker_.is_reference_lane_held()) {
-    std::vector<lanelet::Id> extra_lane_ids;
-    for (const auto & classifier : classifiers_) {
-      const auto lane_ids = classifier->departure_reset_lane_ids();
-      extra_lane_ids.insert(extra_lane_ids.end(), lane_ids.begin(), lane_ids.end());
-    }
     const auto distance_to_reference =
-      departure_distance_m(lane_tracker_, extra_lane_ids, ego_point);
+      departure_distance_m(lane_tracker_, collect_event_lane_ids(classifiers_), ego_point);
     if (distance_to_reference && *distance_to_reference > params_.lane_departure_reset_distance_m) {
       return tl::make_unexpected("ego departed far from the held reference lane");
     }
@@ -235,7 +246,9 @@ void LaneEventClassifierNode::on_trajectory(
   if (const auto tracker_updated = lane_tracker_.update(input_); !tracker_updated) {
     debug_.log_warn(tracker_updated.error());
   }
-  context_.update(lane_tracker_, input_);
+  // The event lanes come from the events before the classifiers run, so the cycle in which an event
+  // ends still has them (docs/lane_crossing.md, "Finding a crossing").
+  context_.update(lane_tracker_, input_, collect_event_lane_ids(classifiers_));
   double lane_tracker_time_ms = stop_watch.toc("lane_tracker");
 
   uint8_t current_state_val = DrivingState::LANE_FOLLOWING;
@@ -270,7 +283,7 @@ void LaneEventClassifierNode::on_trajectory(
     if (const auto tracker_updated = lane_tracker_.update(input_); !tracker_updated) {
       debug_.log_warn(tracker_updated.error());
     }
-    context_.update(lane_tracker_, input_);
+    context_.update(lane_tracker_, input_, collect_event_lane_ids(classifiers_));
     lane_tracker_time_ms += stop_watch.toc("lane_tracker_reanchor");
   }
 

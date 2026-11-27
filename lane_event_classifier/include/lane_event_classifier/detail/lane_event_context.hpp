@@ -34,8 +34,14 @@ namespace lane_event_classifier
 class LaneEventContext
 {
 public:
-  /** @brief Refreshes the derived geometry from the already-updated tracker. */
-  void update(const LaneTracker & tracker, const LaneEventInput & input);
+  /**
+   * @brief Refreshes the derived geometry from the already-updated tracker.
+   * @param event_lane_ids Lanes that the active events add, from
+   *   LaneEventClassifierBase::departure_reset_lane_ids().
+   */
+  void update(
+    const LaneTracker & tracker, const LaneEventInput & input,
+    std::vector<lanelet::Id> event_lane_ids = {});
 
   /** @brief Ids of every lane that at least one footprint corner lies inside. */
   [[nodiscard]] const std::vector<lanelet::Id> & footprint_lane_ids() const
@@ -46,8 +52,15 @@ public:
   /** @brief Straight sequence ids of the reference lane at the given fore/aft reach. */
   [[nodiscard]] const std::unordered_set<lanelet::Id> & sequence_ids(double reach_m) const;
 
+  /**
+   * @brief sequence_ids() plus the lanes that the active events add, for example the bypass branch
+   * of a lane change (docs/lane_change.md, "Bypass branch").
+   */
+  [[nodiscard]] std::unordered_set<lanelet::Id> sequence_and_event_lane_ids(double reach_m) const;
+
 private:
   std::vector<lanelet::Id> footprint_lane_ids_;
+  std::vector<lanelet::Id> event_lane_ids_;
   std::optional<lanelet::ConstLanelet> reference_lane_;
   lanelet::routing::RoutingGraphConstPtr routing_graph_ptr_;
 

@@ -543,7 +543,9 @@ LaneCrossingObservation LaneCrossingGeometry::observe(
                                          ? polyline_arc_length(trajectory_points)
                                          : thresholds_.crossing_look_ahead_m;
   const auto & footprint_ids = context.footprint_lane_ids();
-  const auto & sequence_ids = context.sequence_ids(thresholds_.crossing_look_ahead_m);
+  // The lanes of an active event count as lanes of the sequence (docs/lane_crossing.md, "Finding a
+  // crossing"): the body in a bypass branch is the lane change, not a crossing.
+  const auto sequence_ids = context.sequence_and_event_lane_ids(thresholds_.crossing_look_ahead_m);
 
   observation.is_on_route_straight = driving_straight_stays_on_route(tracker, reference_lane_id);
   auto crossing_result = compute_crossing(
@@ -588,9 +590,10 @@ LaneCrossingGeometry::SourceScan LaneCrossingGeometry::scan_sources(
   auto footprint_crossing =
     has_footprint
       ? get_footprint_crossing(
-          tracker, context.sequence_ids(thresholds_.crossing_look_ahead_m), request.footprint,
-          context.footprint_lane_ids(), sequence.bounds, thresholds_.footprint_boundary_overshoot_m,
-          request.candidate_object_poses, thresholds_.footprint_crossing_object_proximity_m)
+          tracker, context.sequence_and_event_lane_ids(thresholds_.crossing_look_ahead_m),
+          request.footprint, context.footprint_lane_ids(), sequence.bounds,
+          thresholds_.footprint_boundary_overshoot_m, request.candidate_object_poses,
+          thresholds_.footprint_crossing_object_proximity_m)
       : FootprintCrossing{std::nullopt, "none"};
 
   std::string debug_detail = fmt::format(
@@ -628,8 +631,9 @@ LaneCrossingGeometry::CrossingResult LaneCrossingGeometry::compute_crossing(
   }
 
   auto resolved = resolve_crossing(
-    tracker, request.reference_lane, context.sequence_ids(thresholds_.crossing_look_ahead_m),
-    *scan.candidate, scan.is_from_trajectory_source, scan.source, scan.debug_detail);
+    tracker, request.reference_lane,
+    context.sequence_and_event_lane_ids(thresholds_.crossing_look_ahead_m), *scan.candidate,
+    scan.is_from_trajectory_source, scan.source, scan.debug_detail);
   return {std::move(resolved.crossing), std::move(resolved.debug_diagnostic)};
 }
 

@@ -194,7 +194,9 @@ public:
       }
     }
     [[maybe_unused]] const auto update_result = tracker_.update(input);
-    context_.update(tracker_, input);
+    // As in the node, the event lanes come from the events before the classifiers run. Only the
+    // lane change classifier adds lanes.
+    context_.update(tracker_, input, classifier_.departure_reset_lane_ids());
     classifier_.update(input, context_);
     crossing_classifier_.update(input, context_);
     state_ = classifier_.get_state();
@@ -206,7 +208,7 @@ public:
     tracker_.apply_reference_lane_hold(is_active);
     if (was_held && !tracker_.is_reference_lane_held()) {
       [[maybe_unused]] const auto reanchor_result = tracker_.update(input);
-      context_.update(tracker_, input);
+      context_.update(tracker_, input, classifier_.departure_reset_lane_ids());
     }
     const auto & ego_position = input.odometry_ptr->pose.pose.position;
     lane_following_result_ =

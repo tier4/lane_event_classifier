@@ -15,15 +15,20 @@
 #include <lane_event_classifier/detail/lane_event_context.hpp>
 
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace lane_event_classifier
 {
 
-void LaneEventContext::update(const LaneTracker & tracker, const LaneEventInput & input)
+void LaneEventContext::update(
+  const LaneTracker & tracker, const LaneEventInput & input,
+  std::vector<lanelet::Id> event_lane_ids)
 {
   footprint_lane_ids_ = tracker.footprint_lane_ids(input.footprint);
   reference_lane_ = tracker.get_lanelet(tracker.reference_lane().reference_lane_id);
   routing_graph_ptr_ = tracker.routing_graph_ptr();
+  event_lane_ids_ = std::move(event_lane_ids);
 }
 
 const std::unordered_set<lanelet::Id> & LaneEventContext::sequence_ids(double reach_m) const
@@ -33,6 +38,13 @@ const std::unordered_set<lanelet::Id> & LaneEventContext::sequence_ids(double re
     return empty_ids;
   }
   return sequence_caches_[reach_m].get(*reference_lane_, routing_graph_ptr_, reach_m);
+}
+
+std::unordered_set<lanelet::Id> LaneEventContext::sequence_and_event_lane_ids(double reach_m) const
+{
+  auto lane_ids = sequence_ids(reach_m);
+  lane_ids.insert(event_lane_ids_.cbegin(), event_lane_ids_.cend());
+  return lane_ids;
 }
 
 }  // namespace lane_event_classifier
