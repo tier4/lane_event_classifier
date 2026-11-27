@@ -106,6 +106,14 @@ trajectory source is preferred (it is the earlier signal); the footprint source 
 The side of the crossing (left or right) comes from which reference boundary is nearer the crossing
 point.
 
+During a [bypass lane change](lane_change.md#bypass-branch), the straight lane sequence also holds
+the branch and the two route lanes after it. These are the lanes that the departure reset counts for
+that event. The held reference lane stays on the lane before the branch, and the ego drives through
+the branch. Without these lanes, the body in the lanes after the branch is outside the sequence. The
+footprint source then finds a crossing, and an `INTENTIONAL_LANE_CROSSING` follows the end of the
+lane change. The node takes the lanes from the events before the classifiers run. So the cycle in
+which the lane change ends still has them.
+
 ### Exemptions
 
 A found crossing is dropped when any of these holds:

@@ -111,6 +111,10 @@ the route lanes after it, two lanes deep. If the branch has `turn_direction`, th
 lane stays on the reference lane, and the ego drives through the branch. Without the branch in the
 count, the reset can end the event before the body has left the covered lanes.
 
+The [lane-crossing classifier](lane_crossing.md#finding-a-crossing) counts the same lanes as part of
+its straight lane sequence. So the body in the branch and in the lanes after it is not an
+intentional lane crossing. This is also true in the cycle in which the event ends.
+
 ### Exemptions
 
 A found crossing is dropped when any of these hold:
