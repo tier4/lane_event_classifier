@@ -219,6 +219,7 @@ struct BypassMapOptions
   bool is_crossed_line_virtual{false};  // the right bounds of S and S1 are virtual
   bool has_branch_virtual_bound{true};  // the left bound of B is virtual, else a dashed line
   std::string branch_turn_direction;    // turn_direction of B; empty for no tag
+  int n_lane_count{1};                  // N (20 m) is split into this many lanelets of equal length
 };
 
 // Lanelet ids of make_bypass_map and make_bypass_merge_map.
@@ -231,6 +232,7 @@ struct BypassMap
   lanelet::Id b{};   // branch: from the end of R, 4 m to the right, across the right bound of S
   lanelet::Id n{};   // successor of B: y=[-6,-2], 20 m long
   lanelet::Id q{};   // merge map only: the right lane before M, x=[0,20], y=[-6,-2]
+  std::vector<lanelet::Id> lanes_after_n;  // the other lanelets of N in order, when N is split
 };
 
 // Lane R splits at x=20 into the straight lane S and the branch B. B runs diagonally to the right
@@ -274,11 +276,28 @@ inline BypassMap make_bypass_map(const BypassMapOptions & options = {})
     make_typed_line(
       {split_l, b_end_l}, options.has_branch_virtual_bound ? "virtual" : "line_thin", "dashed"),
     make_typed_line({split_r, b_end_r}, "line_thin", "solid"));
-  lanelet::Lanelet n(
-    getId(), make_typed_line({b_end_l, n_end_l}, "line_thin", "dashed"),
-    make_typed_line({b_end_r, n_end_r}, "line_thin", "solid"));
-  for (auto * lane : {&r, &s, &s1, &b, &n}) {
+  // N is split into n_lane_count lanelets of equal length. The first one is n.
+  const int n_lane_count = options.n_lane_count > 1 ? options.n_lane_count : 1;
+  std::vector<Point3d> n_points_l{b_end_l};
+  std::vector<Point3d> n_points_r{b_end_r};
+  for (int i = 1; i < n_lane_count; ++i) {
+    const double x = b_end_x + 20.0 * i / n_lane_count;
+    n_points_l.emplace_back(getId(), x, 2.0 - b_shift, 0.0);
+    n_points_r.emplace_back(getId(), x, -2.0 - b_shift, 0.0);
+  }
+  n_points_l.push_back(n_end_l);
+  n_points_r.push_back(n_end_r);
+  std::vector<lanelet::Lanelet> n_lanes;
+  for (std::size_t i = 0; i + 1 < n_points_l.size(); ++i) {
+    n_lanes.emplace_back(
+      getId(), make_typed_line({n_points_l[i], n_points_l[i + 1]}, "line_thin", "dashed"),
+      make_typed_line({n_points_r[i], n_points_r[i + 1]}, "line_thin", "solid"));
+  }
+  for (auto * lane : {&r, &s, &s1, &b}) {
     mark_road(*lane);
+  }
+  for (auto & lane : n_lanes) {
+    mark_road(lane);
   }
   if (options.is_sibling_shoulder) {
     s.attributes()[lanelet::AttributeName::Subtype] = "road_shoulder";
@@ -290,14 +309,20 @@ inline BypassMap make_bypass_map(const BypassMapOptions & options = {})
 
   BypassMap result;
   result.map = std::make_shared<lanelet::LaneletMap>();
-  for (const auto & lane : {r, s, s1, b, n}) {
+  for (const auto & lane : {r, s, s1, b}) {
+    result.map->add(lane);
+  }
+  for (const auto & lane : n_lanes) {
     result.map->add(lane);
   }
   result.r = r.id();
   result.s = s.id();
   result.s1 = s1.id();
   result.b = b.id();
-  result.n = n.id();
+  result.n = n_lanes.front().id();
+  for (std::size_t i = 1; i < n_lanes.size(); ++i) {
+    result.lanes_after_n.push_back(n_lanes[i].id());
+  }
   return result;
 }
 

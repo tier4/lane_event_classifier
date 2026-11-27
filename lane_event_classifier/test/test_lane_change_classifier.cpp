@@ -349,7 +349,8 @@ std::vector<BypassCycle> drive_through_bypass(
   const autoware_perception_msgs::msg::PredictedObjects::ConstSharedPtr & objects = nullptr)
 {
   Simulator sim{bypass.map, make_config()};
-  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  route.insert(route.end(), bypass.lanes_after_n.cbegin(), bypass.lanes_after_n.cend());
   const auto path = trajectory_along(bypass.map, route, 0.0);
   const auto inside = [&bypass](lanelet::Id lane_id, const lanelet::BasicPoint2d & point) {
     return lanelet::geometry::inside(bypass.map->laneletLayer.get(lane_id), point);
@@ -1002,6 +1003,28 @@ TEST(LaneChangeBypassTest, bypass_event_is_not_followed_by_a_lane_crossing)
 {
   test_maps::BypassMapOptions options;
   options.branch_turn_direction = "right";
+  const auto bypass = test_maps::make_bypass_map(options);
+  const auto car_beside_n = test_maps::make_objects({test_maps::make_object(79.0, -7.2, 4.5, 1.8)});
+  const auto cycles = drive_through_bypass(bypass, 0, car_beside_n);
+  const auto onset =
+    first_cycle(cycles, 0, [](const auto & c) { return c.state == DS::LANE_CHANGING; });
+  ASSERT_LT(onset, cycles.size());
+  const auto end =
+    first_cycle(cycles, onset, [](const auto & c) { return c.state != DS::LANE_CHANGING; });
+  ASSERT_LT(end, cycles.size()) << "the lane change must end within the drive";
+  const auto crossing = first_cycle(
+    cycles, 0, [](const auto & c) { return c.published_state == DS::INTENTIONAL_LANE_CROSSING; });
+  EXPECT_EQ(crossing, cycles.size()) << "INTENTIONAL_LANE_CROSSING at cycle " << crossing
+                                     << ", the lane change ended at cycle " << end;
+}
+
+// N is split into 1 m lanelets, so the bus front reaches the third lanelet after B before the lane
+// change ends. The lanes of the event cover the route after B by distance, not by lanelet count.
+TEST(LaneChangeBypassTest, bypass_event_over_short_lanes_is_not_followed_by_a_lane_crossing)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_turn_direction = "right";
+  options.n_lane_count = 20;
   const auto bypass = test_maps::make_bypass_map(options);
   const auto car_beside_n = test_maps::make_objects({test_maps::make_object(79.0, -7.2, 4.5, 1.8)});
   const auto cycles = drive_through_bypass(bypass, 0, car_beside_n);
