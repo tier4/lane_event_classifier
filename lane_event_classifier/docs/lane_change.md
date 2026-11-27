@@ -85,6 +85,9 @@ A bypass crossing needs all of these:
    length of the branch, has a bound that is not virtual. That bound is the crossed line.
 4. The centerline of the branch crosses that line at less than `bypass_max_crossing_angle_deg`.
    The angle uses the directions of both lines over 1 m before and after the crossing point.
+5. The end of the branch lies at least `bypass_min_side_offset_m` to the side of the end of the
+   reference lane, across the end heading of the reference lane. In a lane split, the branch moves
+   less than one lane width, and the other successor moves away. That is not a lane change.
 
 The crossing point is the first point where the forward trajectory crosses a crossed line. The
 target lane is the branch. The side is the side of the crossed line: the left bound of its lane
