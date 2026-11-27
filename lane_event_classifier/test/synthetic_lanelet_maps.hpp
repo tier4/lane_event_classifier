@@ -211,9 +211,11 @@ inline lanelet::LineString3d make_typed_line(
 // Options of make_bypass_map. The defaults give the shape of the Odaiba bypass (PDDP-886).
 struct BypassMapOptions
 {
-  double branch_length_m{40.0};     // B moves 4 m to the right: 40 m is about 5.7 deg, 4 m 45 deg
-  double sibling_length_m{40.0};    // S runs from x=20 to x=20+sibling_length_m, S1 on to x=100
-  bool is_sibling_shoulder{false};  // S and S1 are road shoulders
+  double branch_length_m{40.0};      // B moves 4 m to the right: 40 m is about 5.7 deg, 4 m 45 deg
+  double sibling_length_m{40.0};     // S runs from x=20 to x=20+sibling_length_m, S1 on to x=100
+  double branch_side_shift_m{4.0};   // how far B (and N) end to the right of R
+  double sibling_side_shift_m{0.0};  // how far S (and S1) end to the left of R
+  bool is_sibling_shoulder{false};   // S and S1 are road shoulders
   bool is_crossed_line_virtual{false};  // the right bounds of S and S1 are virtual
   bool has_branch_virtual_bound{true};  // the left bound of B is virtual, else a dashed line
   std::string branch_turn_direction;    // turn_direction of B; empty for no tag
@@ -246,14 +248,16 @@ inline BypassMap make_bypass_map(const BypassMapOptions & options = {})
   const Point3d r_start_r(getId(), 0.0, -2.0, 0.0);
   const Point3d split_l(getId(), split_x, 2.0, 0.0);
   const Point3d split_r(getId(), split_x, -2.0, 0.0);
-  const Point3d s_end_l(getId(), s_end_x, 2.0, 0.0);
-  const Point3d s_end_r(getId(), s_end_x, -2.0, 0.0);
-  const Point3d end_l(getId(), end_x, 2.0, 0.0);
-  const Point3d end_r(getId(), end_x, -2.0, 0.0);
-  const Point3d b_end_l(getId(), b_end_x, -2.0, 0.0);
-  const Point3d b_end_r(getId(), b_end_x, -6.0, 0.0);
-  const Point3d n_end_l(getId(), b_end_x + 20.0, -2.0, 0.0);
-  const Point3d n_end_r(getId(), b_end_x + 20.0, -6.0, 0.0);
+  const double s_shift = options.sibling_side_shift_m;
+  const double b_shift = options.branch_side_shift_m;
+  const Point3d s_end_l(getId(), s_end_x, 2.0 + s_shift, 0.0);
+  const Point3d s_end_r(getId(), s_end_x, -2.0 + s_shift, 0.0);
+  const Point3d end_l(getId(), end_x, 2.0 + s_shift, 0.0);
+  const Point3d end_r(getId(), end_x, -2.0 + s_shift, 0.0);
+  const Point3d b_end_l(getId(), b_end_x, 2.0 - b_shift, 0.0);
+  const Point3d b_end_r(getId(), b_end_x, -2.0 - b_shift, 0.0);
+  const Point3d n_end_l(getId(), b_end_x + 20.0, 2.0 - b_shift, 0.0);
+  const Point3d n_end_r(getId(), b_end_x + 20.0, -2.0 - b_shift, 0.0);
 
   const std::string crossed_type = options.is_crossed_line_virtual ? "virtual" : "line_thin";
   lanelet::Lanelet r(

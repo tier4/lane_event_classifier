@@ -979,4 +979,35 @@ TEST(LaneChangeBypassTest, empty_footprint_does_not_end_a_bypass_event)
   }
 }
 
+// A lane split, not a lane change (PDDP-886, place 176324): B ends only 1.3 m to the right and S
+// moves 1.8 m to the left. B still crosses the right bound of S, because both start at the end of
+// R, but the ego stays in its lane.
+TEST(LaneChangeBypassTest, lane_split_with_a_small_side_shift_is_not_lane_change)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_side_shift_m = 1.3;
+  options.sibling_side_shift_m = 1.8;
+  options.branch_turn_direction = "right";
+  const auto bypass = test_maps::make_bypass_map(options);
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  EXPECT_FALSE(
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20))
+    << "the branch must end at least bypass_min_side_offset_m to the side";
+}
+
+// The smallest field bypass (place 1527): B ends 2.4 m to the right, S moves 0.85 m to the left.
+TEST(LaneChangeBypassTest, bypass_with_a_lane_wide_side_shift_is_lane_change)
+{
+  test_maps::BypassMapOptions options;
+  options.branch_side_shift_m = 2.4;
+  options.sibling_side_shift_m = 0.85;
+  options.branch_turn_direction = "right";
+  const auto bypass = test_maps::make_bypass_map(options);
+  const std::vector<lanelet::Id> route{bypass.r, bypass.b, bypass.n};
+  const auto trajectory = trajectory_along(bypass.map, route, 5.0);
+  EXPECT_TRUE(
+    lane_change_onset_cycle(bypass.map, route, trajectory, TurnIndicatorsReport::DISABLE, 20));
+}
+
 }  // namespace lane_event_classifier
